@@ -45,6 +45,27 @@ const ROLAND_HEADER = [0xf0, 0x41, 0x10, 0x00, 0x00, 0x00, 0x28, 0x12];
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 /**
+ * Decode base64 to a byte array (inverse of bytesToBase64).
+ */
+function base64ToBytes(b64: string): number[] {
+  const CHARS =
+    'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+  const out: number[] = [];
+  let buf = 0, bits = 0;
+  for (const ch of b64) {
+    const idx = CHARS.indexOf(ch);
+    if (idx < 0) continue;         // skip padding / whitespace
+    buf  = (buf << 6) | idx;
+    bits += 6;
+    if (bits >= 8) {
+      bits -= 8;
+      out.push((buf >> bits) & 0xff);
+    }
+  }
+  return out;
+}
+
+/**
  * Encode a byte array to base64 without relying on Buffer or TextEncoder,
  * both of which can be absent in stock Hermes environments.
  */
@@ -120,10 +141,11 @@ export interface ScanCallbacks {
 export type LogFn = (level: 'info' | 'warn' | 'error' | 'ble', msg: string) => void;
 
 export class BleMidiManager {
-  private readonly ble: BleManager;
-  private device:        Device | null = null;
-  private disconnectSub: { remove(): void } | null = null;
-  private onDisconnectCb: (() => void) | null = null;
+  private readonly ble:    BleManager;
+  private device:          Device | null = null;
+  private disconnectSub:   { remove(): void } | null = null;
+  private midiNotifySub:   { remove(): void } | null = null;
+  private onDisconnectCb:  (() => void) | null = null;
   private log: LogFn;
 
   constructor(log?: LogFn) {
@@ -307,6 +329,28 @@ export class BleMidiManager {
 
     this.device = connected;
 
+    // Subscribe to MIDI characteristic notifications.
+    // Many BLE MIDI devices (including Roland) require the central to subscribe
+    // before they will honour any write-without-response on the same
+    // characteristic.  We also log any incoming MIDI for debugging.
+    this.midiNotifySub?.remove();
+    this.midiNotifySub = connected.monitorCharacteristicForService(
+      BLE_MIDI_SERVICE,
+      BLE_MIDI_CHARACTERISTIC,
+      (error, characteristic) => {
+        if (error) {
+          this.log('warn', `MIDI RX error: ${error.message}`);
+          return;
+        }
+        if (characteristic?.value) {
+          const bytes = base64ToBytes(characteristic.value);
+          const hex   = bytes.map((b) => b.toString(16).padStart(2, '0')).join(' ');
+          this.log('ble', `RX: ${hex}`);
+        }
+      },
+    );
+    this.log('info', 'Subscribed to MIDI notifications');
+
     // Subscribe to disconnection events
     this.disconnectSub?.remove();
     this.disconnectSub = this.ble.onDeviceDisconnected(
@@ -322,6 +366,8 @@ export class BleMidiManager {
 
   async disconnect(): Promise<void> {
     this.log('info', 'Disconnecting…');
+    this.midiNotifySub?.remove();
+    this.midiNotifySub = null;
     this.disconnectSub?.remove();
     this.disconnectSub = null;
     if (this.device) {

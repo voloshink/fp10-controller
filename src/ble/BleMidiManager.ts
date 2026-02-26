@@ -114,11 +114,24 @@ function buildSysEx(addr: readonly number[], value: number): number[] {
 
 /**
  * Wrap a SysEx byte array in BLE-MIDI framing.
- * Timestamp = 0 throughout (valid per spec; piano accepts it).
+ *
+ * Per the BLE MIDI spec (MMA/AMEI):
+ *   "A Timestamp Byte must precede every new MIDI Status Byte within a packet,
+ *    including the SysEx termination byte (0xF7)."
+ *
+ * Correct single-packet SysEx layout:
+ *   [Header=0x80] [Timestamp=0x80] [0xF0 … data …] [Timestamp=0x80] [0xF7]
+ *
+ * Timestamp = 0 throughout (all timestamp bits zero is valid per spec).
  */
 function bleMidiPacket(sysex: number[]): number[] {
-  // Header byte (0x80) + timestamp byte (0x80) before first status byte (0xF0)
-  return [0x80, 0x80, ...sysex];
+  const header    = 0x80;
+  const timestamp = 0x80;
+  // Insert a timestamp byte immediately before the closing 0xF7
+  if (sysex[sysex.length - 1] === 0xf7) {
+    return [header, timestamp, ...sysex.slice(0, -1), timestamp, 0xf7];
+  }
+  return [header, timestamp, ...sysex];
 }
 
 // ─── Types ────────────────────────────────────────────────────────────────────

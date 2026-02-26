@@ -20,7 +20,7 @@
  */
 
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { BleMidiManager, ConnectionStatus, LogFn } from '../ble/BleMidiManager';
+import { BleMidiManager, ConnectionStatus, LogFn, ParamCallback } from '../ble/BleMidiManager';
 import { Device } from 'react-native-ble-plx';
 
 // ─── Public shape ─────────────────────────────────────────────────────────────
@@ -77,8 +77,30 @@ export function useBleMidi(): BleMidiState {
     mgr.onDisconnect(() => {
       setStatus('idle');
       setStatusMessage('Piano disconnected.');
-      setMetronome(false);  // reset toggled state on disconnect
+      setMetronome(false);
     });
+
+    // ── Piano → app parameter updates ──────────────────────────────────────
+    const handleParam: ParamCallback = (addr, data) => {
+      const key = addr.map(b => b.toString(16).padStart(2, '0')).join('');
+      const val = data[0];
+      if (val === undefined) return;
+
+      switch (key) {
+        case '01000309': // BPM — data byte may be > 127 for high tempos
+          if (val >= 20 && val <= 240) setTempo(val);
+          break;
+        case '01000509': // metronome on/off (0x00 = off, anything else = on)
+          setMetronome(val !== 0x00);
+          break;
+        case '01000223': // downbeat
+          setDownbeat(val === 0x01);
+          break;
+        // Unknown addresses are still logged by BleMidiManager — useful for
+        // discovering new parameters via PacketLogger.
+      }
+    };
+    mgr.onParam(handleParam);
 
     return () => {
       mgr.destroy();
@@ -119,6 +141,13 @@ export function useBleMidi(): BleMidiState {
               await mgr.connect(device);
               setStatus('connected');
               setStatusMessage(`Connected to ${device.name}`);
+              // Read current piano state — responses arrive via onParam callback.
+              // Small delay lets the notification subscription settle first.
+              setTimeout(() => {
+                mgr.requestAllParams().catch(e =>
+                  console.warn('[FP-10] requestAllParams failed:', e),
+                );
+              }, 300);
               resolve();
             } catch (err: unknown) {
               reject(err);

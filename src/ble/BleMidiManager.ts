@@ -1,23 +1,34 @@
 /**
  * BleMidiManager
  *
- * Handles all Bluetooth LE MIDI communication with a Roland FP-10 digital
- * piano.  Each public method corresponds to one FP-10 SysEx command.
+ * Handles all Bluetooth LE MIDI communication with a Roland FP-10.
  *
- * BLE-MIDI framing (Bluetooth MIDI Specification §3):
- *   Every BLE write begins with two bytes:
- *     • Header  0x80 | timestamp_high[5:0]  (0x80 when timestamp = 0)
- *     • Before every MIDI status byte: 0x80 | timestamp_low[6:0]  (0x80 when 0)
- *   So the full packet is: [0x80, 0x80, ...sysexBytes]
+ * ── BLE-MIDI framing (TX) ─────────────────────────────────────────────────────
+ *   Single-packet SysEx:
+ *     [Header=0x80] [Timestamp=0x80] [0xF0 … data …] [Timestamp=0x80] [0xF7]
+ *   Timestamp bits all zero is valid per spec.
  *
- * Roland DT1 SysEx format:
+ * ── Roland DT1 write ─────────────────────────────────────────────────────────
  *   F0 41 10 00 00 00 28 12 <addr:4> 00 <value> <checksum> F7
- *   Checksum = (128 - ((addr[0]+addr[1]+addr[2]+addr[3]+value) % 128)) % 128
+ *   Checksum = (128 - (sum(addr, value) % 128)) % 128
  *
- * Confirmed addresses (from packet sniffing):
- *   Tempo      01 00 03 09  value = BPM (20–240)
- *   Metronome  01 00 05 09  value = 0x71 always (piano toggles internally)
- *   Downbeat   01 00 02 23  value = 0x01 (on) | 0x00 (off)
+ * ── Roland RQ1 read request ───────────────────────────────────────────────────
+ *   F0 41 10 00 00 00 28 11 <addr:4> <size:4> <checksum> F7
+ *   Checksum = (128 - (sum(addr, size) % 128)) % 128
+ *   Piano responds via DT1 notification:
+ *   F0 41 10 00 00 00 28 12 <addr:4> <data…> <checksum> F7
+ *
+ * ── BLE-MIDI framing (RX) ────────────────────────────────────────────────────
+ *   Each notification packet starts with a header byte (always strip).
+ *   Within SysEx, bytes with bit7=1 immediately before F0 or F7 are
+ *   BLE-MIDI timestamp bytes — skip them.  All other bytes are MIDI data,
+ *   even if bit7=1 (e.g. BPM values 128–240).
+ *   Multi-packet SysEx is reassembled across notification calls.
+ *
+ * ── Confirmed addresses ───────────────────────────────────────────────────────
+ *   Tempo      01 00 03 09  DT1 value = BPM byte (20–240)
+ *   Metronome  01 00 05 09  DT1 value = 0x71 toggle; RQ1 returns 0x00/0x01
+ *   Downbeat   01 00 02 23  DT1 value = 0x01 on / 0x00 off
  */
 
 import { BleManager, Device, State } from 'react-native-ble-plx';
@@ -27,298 +38,245 @@ import { BleManager, Device, State } from 'react-native-ble-plx';
 const BLE_MIDI_SERVICE        = '03B80E5A-EDE8-4B33-A751-6CE34EC4C700';
 const BLE_MIDI_CHARACTERISTIC = '7772E5DB-3868-4112-A1A9-F2669D106BF3';
 const TARGET_NAME             = 'FP-10';
-
-/**
- * CoreBluetooth peripheral UUIDs previously observed for this piano.
- * iOS uses these stable UUIDs to identify cached/bonded peripherals even when
- * the device isn't actively advertising.  Add new ones from PacketLogger as
- * you find them.
- */
-const KNOWN_PERIPHERAL_UUIDS: string[] = [
-  'ECF3331E-1D75-085D-7440-016F231AB403', // seen in PacketLogger Feb 26
-];
 const SCAN_TIMEOUT_MS         = 15_000;
 
-/** Roland SysEx header: F0 41 10 00 00 00 28 12 */
-const ROLAND_HEADER = [0xf0, 0x41, 0x10, 0x00, 0x00, 0x00, 0x28, 0x12];
+const KNOWN_PERIPHERAL_UUIDS: string[] = [
+  'ECF3331E-1D75-085D-7440-016F231AB403',
+];
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+const ROLAND_HEADER    = [0xf0, 0x41, 0x10, 0x00, 0x00, 0x00, 0x28, 0x12];
+const ROLAND_HEADER_RQ = [0xf0, 0x41, 0x10, 0x00, 0x00, 0x00, 0x28, 0x11];
 
-/**
- * Decode base64 to a byte array (inverse of bytesToBase64).
- */
+// ─── Pure helpers ─────────────────────────────────────────────────────────────
+
+function bytesToBase64(bytes: number[]): string {
+  const C = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+  let out = '';
+  for (let i = 0; i < bytes.length; i += 3) {
+    const b0 = bytes[i], b1 = i+1 < bytes.length ? bytes[i+1] : 0,
+          b2 = i+2 < bytes.length ? bytes[i+2] : 0;
+    out += C[b0 >> 2];
+    out += C[((b0 & 3) << 4) | (b1 >> 4)];
+    out += i+1 < bytes.length ? C[((b1 & 15) << 2) | (b2 >> 6)] : '=';
+    out += i+2 < bytes.length ? C[b2 & 63] : '=';
+  }
+  return out;
+}
+
 function base64ToBytes(b64: string): number[] {
-  const CHARS =
-    'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+  const C = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
   const out: number[] = [];
   let buf = 0, bits = 0;
   for (const ch of b64) {
-    const idx = CHARS.indexOf(ch);
-    if (idx < 0) continue;         // skip padding / whitespace
-    buf  = (buf << 6) | idx;
-    bits += 6;
-    if (bits >= 8) {
-      bits -= 8;
-      out.push((buf >> bits) & 0xff);
-    }
+    const idx = C.indexOf(ch);
+    if (idx < 0) continue;
+    buf = (buf << 6) | idx; bits += 6;
+    if (bits >= 8) { bits -= 8; out.push((buf >> bits) & 0xff); }
   }
   return out;
 }
 
-/**
- * Encode a byte array to base64 without relying on Buffer or TextEncoder,
- * both of which can be absent in stock Hermes environments.
- */
-function bytesToBase64(bytes: number[]): string {
-  const CHARS =
-    'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
-  let out = '';
-  for (let i = 0; i < bytes.length; i += 3) {
-    const b0 = bytes[i];
-    const b1 = i + 1 < bytes.length ? bytes[i + 1] : 0;
-    const b2 = i + 2 < bytes.length ? bytes[i + 2] : 0;
-    out += CHARS[b0 >> 2];
-    out += CHARS[((b0 & 0x03) << 4) | (b1 >> 4)];
-    out += i + 1 < bytes.length ? CHARS[((b1 & 0x0f) << 2) | (b2 >> 6)] : '=';
-    out += i + 2 < bytes.length ? CHARS[b2 & 0x3f] : '=';
-  }
-  return out;
+function hex(bytes: number[]): string {
+  return bytes.map(b => b.toString(16).padStart(2, '0')).join(' ');
 }
 
-/**
- * Roland checksum: (128 - (sum % 128)) % 128
- * Covers the 4 address bytes + the value byte (the fixed 0x00 separator that
- * appears in every captured packet is zero, so it does not affect the sum).
- */
-function rolandChecksum(addr: number[], value: number): number {
-  const bytes = [...addr, value];
-  const sum   = bytes.reduce((a, b) => a + b, 0);
+function rolandChecksum(dataBytes: number[]): number {
+  const sum = dataBytes.reduce((a, b) => a + b, 0);
   return (128 - (sum % 128)) % 128;
 }
 
-/**
- * Build a complete Roland DT1 SysEx message.
- * addr must be exactly 4 bytes (as documented for FP-10).
- */
-function buildSysEx(addr: readonly number[], value: number): number[] {
-  const checksum = rolandChecksum([...addr], value);
-  return [
-    ...ROLAND_HEADER,
-    ...addr,
-    0x00,       // constant separator observed in every FP-10 capture
-    value,
-    checksum,
-    0xf7,
-  ];
+/** Roland DT1 write SysEx */
+function buildDT1(addr: number[], value: number): number[] {
+  const cs = rolandChecksum([...addr, value]);
+  return [...ROLAND_HEADER, ...addr, 0x00, value, cs, 0xf7];
+}
+
+/** Roland RQ1 read-request SysEx (size = number of bytes to read) */
+function buildRQ1(addr: number[], size = 1): number[] {
+  const sizeBytes = [0x00, 0x00, 0x00, size];
+  const cs = rolandChecksum([...addr, ...sizeBytes]);
+  return [...ROLAND_HEADER_RQ, ...addr, ...sizeBytes, cs, 0xf7];
 }
 
 /**
- * Wrap a SysEx byte array in BLE-MIDI framing.
- *
- * Per the BLE MIDI spec (MMA/AMEI):
- *   "A Timestamp Byte must precede every new MIDI Status Byte within a packet,
- *    including the SysEx termination byte (0xF7)."
- *
- * Correct single-packet SysEx layout:
- *   [Header=0x80] [Timestamp=0x80] [0xF0 … data …] [Timestamp=0x80] [0xF7]
- *
- * Timestamp = 0 throughout (all timestamp bits zero is valid per spec).
+ * BLE-MIDI TX framing: wrap a SysEx with header + timestamps.
+ * Inserts a timestamp byte (0x80) before both F0 (at position 0) and F7.
  */
-function bleMidiPacket(sysex: number[]): number[] {
-  const header    = 0x80;
-  const timestamp = 0x80;
-  // Insert a timestamp byte immediately before the closing 0xF7
+function bleMidiWrap(sysex: number[]): number[] {
   if (sysex[sysex.length - 1] === 0xf7) {
-    return [header, timestamp, ...sysex.slice(0, -1), timestamp, 0xf7];
+    return [0x80, 0x80, ...sysex.slice(0, -1), 0x80, 0xf7];
   }
-  return [header, timestamp, ...sysex];
+  return [0x80, 0x80, ...sysex];
+}
+
+// ─── BLE-MIDI RX reassembler ──────────────────────────────────────────────────
+
+/**
+ * Stateful reassembler that strips BLE-MIDI framing from incoming notification
+ * packets and emits complete SysEx messages.
+ *
+ * BLE-MIDI RX framing rules applied here:
+ *   • Byte 0 of every packet = header → always discard.
+ *   • A byte with bit7=1 immediately before F0 = timestamp → discard.
+ *   • A byte with bit7=1 immediately before F7 = timestamp → discard.
+ *   • All other bytes (even those with bit7=1, e.g. BPM > 127) = MIDI data.
+ */
+class SysExReassembler {
+  private buf: number[] = [];
+  private inSysex = false;
+
+  /** Feed one raw BLE notification payload; returns any complete SysEx found. */
+  push(packet: number[]): number[][] {
+    const complete: number[][] = [];
+    // Skip header byte (packet[0]) and iterate the rest
+    for (let i = 1; i < packet.length; i++) {
+      const b    = packet[i];
+      const peek = packet[i + 1]; // undefined if last byte
+
+      if (this.inSysex) {
+        if ((b & 0x80) && peek === 0xf7) {
+          // Timestamp before F7 — discard this byte, F7 handled next iteration
+          continue;
+        }
+        if (b === 0xf7) {
+          this.buf.push(0xf7);
+          complete.push([...this.buf]);
+          this.buf = [];
+          this.inSysex = false;
+        } else {
+          // Normal data byte inside SysEx (bit7=1 allowed — e.g. BPM > 127)
+          this.buf.push(b);
+        }
+      } else {
+        if ((b & 0x80) && peek === 0xf0) {
+          // Timestamp before F0 — discard
+          continue;
+        }
+        if (b === 0xf0) {
+          this.buf = [0xf0];
+          this.inSysex = true;
+        }
+        // Non-SysEx MIDI bytes ignored
+      }
+    }
+    return complete;
+  }
+
+  reset() { this.buf = []; this.inSysex = false; }
 }
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 export type ConnectionStatus =
-  | 'idle'
-  | 'scanning'
-  | 'connecting'
-  | 'connected'
-  | 'error';
+  | 'idle' | 'scanning' | 'connecting' | 'connected' | 'error';
+
+export type LogFn = (
+  level: 'info' | 'warn' | 'error' | 'ble',
+  msg: string,
+) => void;
+
+/** Callback fired when the piano sends a DT1 parameter value. */
+export type ParamCallback = (addr: number[], data: number[]) => void;
 
 export interface ScanCallbacks {
-  onFound:      (device: Device) => void;
-  onError:      (err: Error) => void;
-  onTimeout:    () => void;
+  onFound:   (device: Device) => void;
+  onError:   (err: Error) => void;
+  onTimeout: () => void;
 }
 
-// ─── Manager class ────────────────────────────────────────────────────────────
-
-export type LogFn = (level: 'info' | 'warn' | 'error' | 'ble', msg: string) => void;
+// ─── Manager ─────────────────────────────────────────────────────────────────
 
 export class BleMidiManager {
-  private readonly ble:    BleManager;
-  private device:          Device | null = null;
-  private disconnectSub:   { remove(): void } | null = null;
-  private midiNotifySub:   { remove(): void } | null = null;
-  private onDisconnectCb:  (() => void) | null = null;
-  private log: LogFn;
+  private readonly ble:   BleManager;
+  private device:         Device | null = null;
+  private disconnectSub:  { remove(): void } | null = null;
+  private midiNotifySub:  { remove(): void } | null = null;
+  private onDisconnectCb: (() => void) | null = null;
+  private onParamCb:      ParamCallback | null = null;
+  private log:            LogFn;
+  private rx =            new SysExReassembler();
 
   constructor(log?: LogFn) {
     this.ble = new BleManager();
-    this.log = log ?? ((_, msg) => console.log(msg));
+    this.log = log ?? ((_, m) => console.log(m));
   }
 
-  /** Free native resources. Call from a useEffect cleanup. */
-  destroy() {
-    this.disconnectSub?.remove();
-    this.ble.destroy();
-  }
-
-  /** Swap the log function after construction (e.g. once a React hook is ready). */
-  setLogFn(fn: LogFn) {
-    this.log = fn;
-  }
-
-  /** Register a callback invoked whenever the piano disconnects unexpectedly. */
-  onDisconnect(cb: () => void) {
-    this.onDisconnectCb = cb;
-  }
+  destroy()          { this.disconnectSub?.remove(); this.ble.destroy(); }
+  setLogFn(fn: LogFn){ this.log = fn; }
+  onDisconnect(cb: () => void)    { this.onDisconnectCb = cb; }
+  /** Register a callback for all DT1 responses / proactive piano notifications. */
+  onParam(cb: ParamCallback)      { this.onParamCb = cb; }
 
   // ── Bluetooth state ────────────────────────────────────────────────────────
 
-  /**
-   * Resolves when BT is powered on; rejects if it is unavailable/unauthorised.
-   * Emits the current state immediately so it resolves instantly when BT is
-   * already ready.
-   */
   waitForPoweredOn(timeoutMs = 6_000): Promise<void> {
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        sub.remove();
-        reject(new Error('Bluetooth is taking too long to start. Is it enabled?'));
-      }, timeoutMs);
-
+      const timer = setTimeout(() => { sub.remove(); reject(new Error('Bluetooth slow to start')); }, timeoutMs);
       const sub = this.ble.onStateChange((state) => {
         this.log('info', `BLE state → ${state}`);
         if (state === State.PoweredOn) {
-          clearTimeout(timer);
-          sub.remove();
-          resolve();
-        } else if (
-          state === State.PoweredOff ||
-          state === State.Unauthorized ||
-          state === State.Unsupported
-        ) {
-          clearTimeout(timer);
-          sub.remove();
-          reject(new Error(`Bluetooth unavailable (${state}). Check Settings.`));
+          clearTimeout(timer); sub.remove(); resolve();
+        } else if ([State.PoweredOff, State.Unauthorized, State.Unsupported].includes(state)) {
+          clearTimeout(timer); sub.remove();
+          reject(new Error(`Bluetooth unavailable (${state})`));
         }
-        // State.Unknown / State.Resetting — keep waiting
-      }, true /* emitCurrentState */);
+      }, true);
     });
   }
 
   // ── Scanning ───────────────────────────────────────────────────────────────
 
-  /**
-   * Try to find the FP-10 via three strategies in order:
-   *   1. Already connected to iOS at the system level (connectedDevices)
-   *   2. Cached by CoreBluetooth from a previous session (devices by UUID)
-   *   3. Active BLE scan
-   *
-   * Returns a stop() function the caller can invoke early.
-   */
   startScan(callbacks: ScanCallbacks): () => void {
     let finished = false;
-
     const done = (fn: () => void) => {
-      if (finished) return;
-      finished = true;
-      this.ble.stopDeviceScan();
-      fn();
+      if (finished) return; finished = true; this.ble.stopDeviceScan(); fn();
     };
-
-    const timeoutId = setTimeout(
-      () => done(callbacks.onTimeout),
-      SCAN_TIMEOUT_MS,
-    );
-
-    // Run async strategies, fall through to live scan
-    this.findDevice(done, callbacks, timeoutId);
-
-    return () => {
-      clearTimeout(timeoutId);
-      done(() => {});
-    };
+    const tid = setTimeout(() => done(callbacks.onTimeout), SCAN_TIMEOUT_MS);
+    this.findDevice(done, callbacks, tid);
+    return () => { clearTimeout(tid); done(() => {}); };
   }
 
   private async findDevice(
     done: (fn: () => void) => void,
-    callbacks: ScanCallbacks,
-    timeoutId: ReturnType<typeof setTimeout>,
+    cb: ScanCallbacks,
+    tid: ReturnType<typeof setTimeout>,
   ) {
-    // ── Strategy 1: already connected at OS level ──────────────────────────
-    this.log('info', 'Checking for already-connected BLE MIDI devices…');
+    // 1. Already connected
+    this.log('info', 'Checking already-connected BLE MIDI devices…');
     try {
-      const connected = await this.ble.connectedDevices([BLE_MIDI_SERVICE]);
-      this.log('info', `Connected devices: ${connected.length}`);
-      for (const d of connected) {
+      for (const d of await this.ble.connectedDevices([BLE_MIDI_SERVICE])) {
         const name = d.name ?? d.localName ?? '(no name)';
         this.log('ble', `Already connected: "${name}"  id=${d.id}`);
         if (name === TARGET_NAME || d.localName === TARGET_NAME) {
-          this.log('info', `✓ Found ${TARGET_NAME} already connected — reusing`);
-          clearTimeout(timeoutId);
-          done(() => callbacks.onFound(d));
-          return;
+          clearTimeout(tid); done(() => cb.onFound(d)); return;
         }
       }
-    } catch (e: unknown) {
-      this.log('warn', `connectedDevices() error: ${String(e)}`);
-    }
+    } catch (e) { this.log('warn', `connectedDevices error: ${e}`); }
 
-    // ── Strategy 2: known peripheral UUIDs cached by CoreBluetooth ─────────
-    this.log('info', 'Checking CoreBluetooth peripheral cache…');
+    // 2. CoreBluetooth cache
+    this.log('info', 'Checking CoreBluetooth cache…');
     try {
-      // Pass common UUIDs seen in PacketLogger / previous sessions
-      const known = await this.ble.devices(KNOWN_PERIPHERAL_UUIDS);
-      this.log('info', `Cached peripherals: ${known.length}`);
-      for (const d of known) {
+      for (const d of await this.ble.devices(KNOWN_PERIPHERAL_UUIDS)) {
         const name = d.name ?? d.localName ?? '(no name)';
         this.log('ble', `Cached: "${name}"  id=${d.id}`);
         if (name === TARGET_NAME || d.localName === TARGET_NAME) {
-          this.log('info', `✓ Found ${TARGET_NAME} in cache — using it`);
-          clearTimeout(timeoutId);
-          done(() => callbacks.onFound(d));
-          return;
+          clearTimeout(tid); done(() => cb.onFound(d)); return;
         }
       }
-    } catch (e: unknown) {
-      this.log('warn', `devices() cache error: ${String(e)}`);
-    }
+    } catch (e) { this.log('warn', `devices cache error: ${e}`); }
 
-    // ── Strategy 3: live scan ───────────────────────────────────────────────
+    // 3. Live scan
     this.log('info', 'Starting live BLE scan…');
-
-    this.ble.startDeviceScan(
-      null,                       // no service-UUID filter — FP-10 may not advertise it
-      { allowDuplicates: false },
-      (error, device) => {
-        if (error) {
-          this.log('error', `Scan error: ${error.message}`);
-          clearTimeout(timeoutId);
-          done(() => callbacks.onError(error));
-          return;
+    this.ble.startDeviceScan(null, { allowDuplicates: false }, (err, device) => {
+      if (err) { clearTimeout(tid); done(() => cb.onError(err)); return; }
+      if (device) {
+        const name = device.name ?? device.localName ?? '(no name)';
+        this.log('ble', `Found: "${name}"  id=${device.id}`);
+        if (name === TARGET_NAME || device.localName === TARGET_NAME) {
+          clearTimeout(tid); done(() => cb.onFound(device));
         }
-        if (device) {
-          const name = device.name ?? device.localName ?? '(no name)';
-          this.log('ble', `Found: "${name}"  id=${device.id}`);
-
-          if (name === TARGET_NAME || device.localName === TARGET_NAME) {
-            this.log('info', `✓ Matched ${TARGET_NAME} — stopping scan`);
-            clearTimeout(timeoutId);
-            done(() => callbacks.onFound(device));
-          }
-        }
-      },
-    );
+      }
+    });
   }
 
   // ── Connection ─────────────────────────────────────────────────────────────
@@ -328,112 +286,122 @@ export class BleMidiManager {
     const connected = await device.connect({ autoConnect: false });
     this.log('info', 'Connected — discovering services…');
     await connected.discoverAllServicesAndCharacteristics();
-    this.log('info', 'Services discovered — ready');
+    this.log('info', 'Services discovered');
 
-    // Log available services so we can verify the MIDI service is present
-    const services = await connected.services();
-    for (const svc of services) {
+    for (const svc of await connected.services()) {
       this.log('ble', `Service: ${svc.uuid}`);
-      const chars = await svc.characteristics();
-      for (const c of chars) {
+      for (const c of await svc.characteristics()) {
         this.log('ble', `  Char: ${c.uuid}  write=${c.isWritableWithoutResponse}`);
       }
     }
 
     this.device = connected;
+    this.rx.reset();
 
-    // Subscribe to MIDI characteristic notifications.
-    // Many BLE MIDI devices (including Roland) require the central to subscribe
-    // before they will honour any write-without-response on the same
-    // characteristic.  We also log any incoming MIDI for debugging.
+    // Subscribe to notifications — required before the piano accepts writes
     this.midiNotifySub?.remove();
     this.midiNotifySub = connected.monitorCharacteristicForService(
-      BLE_MIDI_SERVICE,
-      BLE_MIDI_CHARACTERISTIC,
-      (error, characteristic) => {
-        if (error) {
-          this.log('warn', `MIDI RX error: ${error.message}`);
-          return;
-        }
-        if (characteristic?.value) {
-          const bytes = base64ToBytes(characteristic.value);
-          const hex   = bytes.map((b) => b.toString(16).padStart(2, '0')).join(' ');
-          this.log('ble', `RX: ${hex}`);
+      BLE_MIDI_SERVICE, BLE_MIDI_CHARACTERISTIC,
+      (error, char) => {
+        if (error) { this.log('warn', `MIDI RX error: ${error.message}`); return; }
+        if (!char?.value) return;
+        const bytes = base64ToBytes(char.value);
+        this.log('ble', `RX: ${hex(bytes)}`);
+        // Reassemble and parse any complete SysEx messages
+        for (const sysex of this.rx.push(bytes)) {
+          this.handleSysEx(sysex);
         }
       },
     );
     this.log('info', 'Subscribed to MIDI notifications');
 
-    // Subscribe to disconnection events
     this.disconnectSub?.remove();
-    this.disconnectSub = this.ble.onDeviceDisconnected(
-      connected.id,
-      (_err, _dev) => {
-        this.device = null;
-        this.disconnectSub?.remove();
-        this.disconnectSub = null;
-        this.onDisconnectCb?.();
-      },
-    );
+    this.disconnectSub = this.ble.onDeviceDisconnected(connected.id, () => {
+      this.device = null;
+      this.disconnectSub?.remove(); this.disconnectSub = null;
+      this.rx.reset();
+      this.onDisconnectCb?.();
+    });
   }
 
   async disconnect(): Promise<void> {
     this.log('info', 'Disconnecting…');
-    this.midiNotifySub?.remove();
-    this.midiNotifySub = null;
-    this.disconnectSub?.remove();
-    this.disconnectSub = null;
+    this.midiNotifySub?.remove(); this.midiNotifySub = null;
+    this.disconnectSub?.remove(); this.disconnectSub = null;
+    this.rx.reset();
     if (this.device) {
       await this.device.cancelConnection().catch(() => {});
       this.device = null;
     }
-    this.log('info', 'Disconnected');
   }
 
-  get isConnected(): boolean {
-    return this.device !== null;
+  get isConnected() { return this.device !== null; }
+
+  // ── SysEx RX parser ───────────────────────────────────────────────────────
+
+  private handleSysEx(sysex: number[]): void {
+    this.log('ble', `SysEx: ${hex(sysex)}`);
+
+    // Only handle Roland DT1 responses: F0 41 10 00 00 00 28 12 ...
+    if (
+      sysex.length < 14 ||
+      sysex[1] !== 0x41 || sysex[2] !== 0x10 ||
+      sysex[7] !== 0x12
+    ) return;
+
+    // Layout: [F0 41 10 00 00 00 28 12] [addr:4] [data:N] [checksum] [F7]
+    const addr = sysex.slice(8, 12);
+    // data = everything between address and the last 2 bytes (checksum, F7)
+    const data = sysex.slice(12, sysex.length - 2);
+
+    this.log('info',
+      `DT1 ← addr=[${hex(addr)}]  data=[${hex(data)}]`,
+    );
+    this.onParamCb?.(addr, data);
   }
 
   // ── MIDI write ─────────────────────────────────────────────────────────────
 
   private async writeSysEx(sysex: number[]): Promise<void> {
     if (!this.device) throw new Error('Not connected to FP-10');
-    const packet = bleMidiPacket(sysex);
-    const hex    = packet.map((b) => b.toString(16).padStart(2, '0')).join(' ');
-    this.log('ble', `TX: ${hex}`);
-    const b64    = bytesToBase64(packet);
+    const packet = bleMidiWrap(sysex);
+    this.log('ble', `TX: ${hex(packet)}`);
     await this.device.writeCharacteristicWithoutResponseForService(
-      BLE_MIDI_SERVICE,
-      BLE_MIDI_CHARACTERISTIC,
-      b64,
+      BLE_MIDI_SERVICE, BLE_MIDI_CHARACTERISTIC, bytesToBase64(packet),
     );
   }
 
-  // ── FP-10 commands ─────────────────────────────────────────────────────────
+  // ── FP-10 write commands ───────────────────────────────────────────────────
 
-  /**
-   * Set metronome tempo (20–240 BPM).
-   * Address: 01 00 03 09
-   */
   async sendTempo(bpm: number): Promise<void> {
-    const clamped = Math.max(20, Math.min(240, Math.round(bpm)));
-    await this.writeSysEx(buildSysEx([0x01, 0x00, 0x03, 0x09], clamped));
+    const v = Math.max(20, Math.min(240, Math.round(bpm)));
+    await this.writeSysEx(buildDT1([0x01, 0x00, 0x03, 0x09], v));
   }
 
-  /**
-   * Toggle metronome on/off.  The piano acts as a flip-flop: value 0x71 is
-   * always sent; the piano handles state internally.
-   * Address: 01 00 05 09
-   */
   async sendMetronomeToggle(): Promise<void> {
-    await this.writeSysEx(buildSysEx([0x01, 0x00, 0x05, 0x09], 0x71));
+    await this.writeSysEx(buildDT1([0x01, 0x00, 0x05, 0x09], 0x71));
   }
 
-  /**
-   * Enable or disable the downbeat accent (beat-1 accent).
-   * Address: 01 00 02 23  value: 0x01 = on, 0x00 = off
-   */
   async sendDownbeat(on: boolean): Promise<void> {
-    await this.writeSysEx(buildSysEx([0x01, 0x00, 0x02, 0x23], on ? 0x01 : 0x00));
+    await this.writeSysEx(buildDT1([0x01, 0x00, 0x02, 0x23], on ? 0x01 : 0x00));
+  }
+
+  // ── FP-10 read requests (RQ1) ─────────────────────────────────────────────
+
+  /**
+   * Ask the piano for the current value of one parameter (1 byte).
+   * The response arrives asynchronously via the onParam callback.
+   */
+  async requestParam(addr: number[]): Promise<void> {
+    const sysex = buildRQ1(addr, 1);
+    this.log('ble', `RQ1 → addr=[${hex(addr)}]`);
+    await this.writeSysEx(sysex);
+  }
+
+  /** Convenience: read all three metronome-related parameters in sequence. */
+  async requestAllParams(): Promise<void> {
+    await this.requestParam([0x01, 0x00, 0x03, 0x09]); // BPM
+    await this.requestParam([0x01, 0x00, 0x05, 0x09]); // metronome on/off
+    await this.requestParam([0x01, 0x00, 0x02, 0x23]); // downbeat
   }
 }

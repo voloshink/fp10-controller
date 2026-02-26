@@ -1,0 +1,26 @@
+{
+  "expo": {
+    "name": "FP-10 Controller",
+    "slug": "fp10-controller",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "splash": {
+      "backgroundColor": "#0D0D10"
+    },
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.pianoapp.fp10controller"
+    },
+    "plugins": [
+      [
+        "react-native-ble-plx",
+        {
+          "isBackgroundEnabled": false,
+          "modes": ["central"],
+          "bluetoothAlwaysPermission": "Allow FP-10 Controller to connect to your Roland FP-10 piano via Bluetooth."
+        }
+      ]
+    ]
+  }
+}

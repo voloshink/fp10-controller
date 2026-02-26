@@ -37,5 +37,6 @@ yarn-error.log*
 # ── Metro bundler cache ───────────────────────────────────────────────────────
 .metro-health-check*
 
-# ── pnpm ──────────────────────────────────────────────────────────────────────
-# pnpm-lock.yaml is intentionally tracked (committed to version control)
+# ── Lockfiles ─────────────────────────────────────────────────────────────────
+# package-lock.json is intentionally tracked (committed to version control)
+pnpm-lock.yaml

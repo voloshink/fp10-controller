@@ -2,7 +2,6 @@
   "name": "fp10-controller",
   "version": "1.0.0",
   "main": "index.js",
-  "packageManager": "pnpm@10.7.0",
   "scripts": {
     "start": "expo start",
     "ios": "expo run:ios",
@@ -10,6 +9,7 @@
     "prebuild": "expo prebuild --clean"
   },
   "dependencies": {
+    "@babel/runtime": "^7.28.6",
     "@react-native-community/slider": "^4.5.2",
     "expo": "~51.0.0",
     "expo-status-bar": "~1.12.1",

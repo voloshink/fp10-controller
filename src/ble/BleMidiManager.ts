@@ -27,6 +27,16 @@ import { BleManager, Device, State } from 'react-native-ble-plx';
 const BLE_MIDI_SERVICE        = '03B80E5A-EDE8-4B33-A751-6CE34EC4C700';
 const BLE_MIDI_CHARACTERISTIC = '7772E5DB-3868-4112-A1A9-F2669D106BF3';
 const TARGET_NAME             = 'FP-10';
+
+/**
+ * CoreBluetooth peripheral UUIDs previously observed for this piano.
+ * iOS uses these stable UUIDs to identify cached/bonded peripherals even when
+ * the device isn't actively advertising.  Add new ones from PacketLogger as
+ * you find them.
+ */
+const KNOWN_PERIPHERAL_UUIDS: string[] = [
+  'ECF3331E-1D75-085D-7440-016F231AB403', // seen in PacketLogger Feb 26
+];
 const SCAN_TIMEOUT_MS         = 15_000;
 
 /** Roland SysEx header: F0 41 10 00 00 00 28 12 */
@@ -174,7 +184,11 @@ export class BleMidiManager {
   // ── Scanning ───────────────────────────────────────────────────────────────
 
   /**
-   * Begin a BLE scan limited to SCAN_TIMEOUT_MS.
+   * Try to find the FP-10 via three strategies in order:
+   *   1. Already connected to iOS at the system level (connectedDevices)
+   *   2. Cached by CoreBluetooth from a previous session (devices by UUID)
+   *   3. Active BLE scan
+   *
    * Returns a stop() function the caller can invoke early.
    */
   startScan(callbacks: ScanCallbacks): () => void {
@@ -192,7 +206,61 @@ export class BleMidiManager {
       SCAN_TIMEOUT_MS,
     );
 
-    this.log('info', 'Scan started — listening for all BLE devices…');
+    // Run async strategies, fall through to live scan
+    this.findDevice(done, callbacks, timeoutId);
+
+    return () => {
+      clearTimeout(timeoutId);
+      done(() => {});
+    };
+  }
+
+  private async findDevice(
+    done: (fn: () => void) => void,
+    callbacks: ScanCallbacks,
+    timeoutId: ReturnType<typeof setTimeout>,
+  ) {
+    // ── Strategy 1: already connected at OS level ──────────────────────────
+    this.log('info', 'Checking for already-connected BLE MIDI devices…');
+    try {
+      const connected = await this.ble.connectedDevices([BLE_MIDI_SERVICE]);
+      this.log('info', `Connected devices: ${connected.length}`);
+      for (const d of connected) {
+        const name = d.name ?? d.localName ?? '(no name)';
+        this.log('ble', `Already connected: "${name}"  id=${d.id}`);
+        if (name === TARGET_NAME || d.localName === TARGET_NAME) {
+          this.log('info', `✓ Found ${TARGET_NAME} already connected — reusing`);
+          clearTimeout(timeoutId);
+          done(() => callbacks.onFound(d));
+          return;
+        }
+      }
+    } catch (e: unknown) {
+      this.log('warn', `connectedDevices() error: ${String(e)}`);
+    }
+
+    // ── Strategy 2: known peripheral UUIDs cached by CoreBluetooth ─────────
+    this.log('info', 'Checking CoreBluetooth peripheral cache…');
+    try {
+      // Pass common UUIDs seen in PacketLogger / previous sessions
+      const known = await this.ble.devices(KNOWN_PERIPHERAL_UUIDS);
+      this.log('info', `Cached peripherals: ${known.length}`);
+      for (const d of known) {
+        const name = d.name ?? d.localName ?? '(no name)';
+        this.log('ble', `Cached: "${name}"  id=${d.id}`);
+        if (name === TARGET_NAME || d.localName === TARGET_NAME) {
+          this.log('info', `✓ Found ${TARGET_NAME} in cache — using it`);
+          clearTimeout(timeoutId);
+          done(() => callbacks.onFound(d));
+          return;
+        }
+      }
+    } catch (e: unknown) {
+      this.log('warn', `devices() cache error: ${String(e)}`);
+    }
+
+    // ── Strategy 3: live scan ───────────────────────────────────────────────
+    this.log('info', 'Starting live BLE scan…');
 
     this.ble.startDeviceScan(
       null,                       // no service-UUID filter — FP-10 may not advertise it
@@ -205,10 +273,8 @@ export class BleMidiManager {
           return;
         }
         if (device) {
-          // Log every visible device so we can spot naming issues
           const name = device.name ?? device.localName ?? '(no name)';
-          const id   = device.id;
-          this.log('ble', `Found: "${name}"  id=${id}`);
+          this.log('ble', `Found: "${name}"  id=${device.id}`);
 
           if (name === TARGET_NAME || device.localName === TARGET_NAME) {
             this.log('info', `✓ Matched ${TARGET_NAME} — stopping scan`);
@@ -218,11 +284,6 @@ export class BleMidiManager {
         }
       },
     );
-
-    return () => {
-      clearTimeout(timeoutId);
-      done(() => {});
-    };
   }
 
   // ── Connection ─────────────────────────────────────────────────────────────

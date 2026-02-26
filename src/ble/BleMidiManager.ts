@@ -387,21 +387,23 @@ export class BleMidiManager {
   }
 
   // ── FP-10 read requests (RQ1) ─────────────────────────────────────────────
+  //
+  // ⚠️  CAUTION — the FP-10 disconnects if it receives an RQ1 for an address
+  // it does not support.  The Roland Piano Partner 2 app reads bulk blocks at
+  // 01 00 07 00 and 01 00 08 00 (not the individual write addresses).
+  // Do not call requestParam() until the correct bulk addresses and offsets
+  // are confirmed via PacketLogger.
+  //
+  // The infrastructure is kept here for future use.
 
   /**
-   * Ask the piano for the current value of one parameter (1 byte).
-   * The response arrives asynchronously via the onParam callback.
+   * Ask the piano for the current value at addr (1 byte).
+   * Response arrives via the onParam callback.
+   * Only call this with confirmed readable addresses.
    */
   async requestParam(addr: number[]): Promise<void> {
     const sysex = buildRQ1(addr, 1);
     this.log('ble', `RQ1 → addr=[${hex(addr)}]`);
     await this.writeSysEx(sysex);
-  }
-
-  /** Convenience: read all three metronome-related parameters in sequence. */
-  async requestAllParams(): Promise<void> {
-    await this.requestParam([0x01, 0x00, 0x03, 0x09]); // BPM
-    await this.requestParam([0x01, 0x00, 0x05, 0x09]); // metronome on/off
-    await this.requestParam([0x01, 0x00, 0x02, 0x23]); // downbeat
   }
 }

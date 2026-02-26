@@ -141,13 +141,6 @@ export function useBleMidi(): BleMidiState {
               await mgr.connect(device);
               setStatus('connected');
               setStatusMessage(`Connected to ${device.name}`);
-              // Read current piano state — responses arrive via onParam callback.
-              // Small delay lets the notification subscription settle first.
-              setTimeout(() => {
-                mgr.requestAllParams().catch(e =>
-                  console.warn('[FP-10] requestAllParams failed:', e),
-                );
-              }, 300);
               resolve();
             } catch (err: unknown) {
               reject(err);

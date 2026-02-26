@@ -107,20 +107,29 @@ export interface ScanCallbacks {
 
 // ─── Manager class ────────────────────────────────────────────────────────────
 
+export type LogFn = (level: 'info' | 'warn' | 'error' | 'ble', msg: string) => void;
+
 export class BleMidiManager {
   private readonly ble: BleManager;
-  private device:       Device | null = null;
+  private device:        Device | null = null;
   private disconnectSub: { remove(): void } | null = null;
   private onDisconnectCb: (() => void) | null = null;
+  private log: LogFn;
 
-  constructor() {
+  constructor(log?: LogFn) {
     this.ble = new BleManager();
+    this.log = log ?? ((_, msg) => console.log(msg));
   }
 
   /** Free native resources. Call from a useEffect cleanup. */
   destroy() {
     this.disconnectSub?.remove();
     this.ble.destroy();
+  }
+
+  /** Swap the log function after construction (e.g. once a React hook is ready). */
+  setLogFn(fn: LogFn) {
+    this.log = fn;
   }
 
   /** Register a callback invoked whenever the piano disconnects unexpectedly. */
@@ -143,6 +152,7 @@ export class BleMidiManager {
       }, timeoutMs);
 
       const sub = this.ble.onStateChange((state) => {
+        this.log('info', `BLE state → ${state}`);
         if (state === State.PoweredOn) {
           clearTimeout(timer);
           sub.remove();
@@ -182,18 +192,29 @@ export class BleMidiManager {
       SCAN_TIMEOUT_MS,
     );
 
+    this.log('info', 'Scan started — listening for all BLE devices…');
+
     this.ble.startDeviceScan(
       null,                       // no service-UUID filter — FP-10 may not advertise it
       { allowDuplicates: false },
       (error, device) => {
         if (error) {
+          this.log('error', `Scan error: ${error.message}`);
           clearTimeout(timeoutId);
           done(() => callbacks.onError(error));
           return;
         }
-        if (device?.name === TARGET_NAME) {
-          clearTimeout(timeoutId);
-          done(() => callbacks.onFound(device));
+        if (device) {
+          // Log every visible device so we can spot naming issues
+          const name = device.name ?? device.localName ?? '(no name)';
+          const id   = device.id;
+          this.log('ble', `Found: "${name}"  id=${id}`);
+
+          if (name === TARGET_NAME || device.localName === TARGET_NAME) {
+            this.log('info', `✓ Matched ${TARGET_NAME} — stopping scan`);
+            clearTimeout(timeoutId);
+            done(() => callbacks.onFound(device));
+          }
         }
       },
     );
@@ -207,8 +228,22 @@ export class BleMidiManager {
   // ── Connection ─────────────────────────────────────────────────────────────
 
   async connect(device: Device): Promise<void> {
+    this.log('info', `Connecting to ${device.name ?? device.id}…`);
     const connected = await device.connect({ autoConnect: false });
+    this.log('info', 'Connected — discovering services…');
     await connected.discoverAllServicesAndCharacteristics();
+    this.log('info', 'Services discovered — ready');
+
+    // Log available services so we can verify the MIDI service is present
+    const services = await connected.services();
+    for (const svc of services) {
+      this.log('ble', `Service: ${svc.uuid}`);
+      const chars = await svc.characteristics();
+      for (const c of chars) {
+        this.log('ble', `  Char: ${c.uuid}  write=${c.isWritableWithoutResponse}`);
+      }
+    }
+
     this.device = connected;
 
     // Subscribe to disconnection events
@@ -225,12 +260,14 @@ export class BleMidiManager {
   }
 
   async disconnect(): Promise<void> {
+    this.log('info', 'Disconnecting…');
     this.disconnectSub?.remove();
     this.disconnectSub = null;
     if (this.device) {
       await this.device.cancelConnection().catch(() => {});
       this.device = null;
     }
+    this.log('info', 'Disconnected');
   }
 
   get isConnected(): boolean {
@@ -242,6 +279,8 @@ export class BleMidiManager {
   private async writeSysEx(sysex: number[]): Promise<void> {
     if (!this.device) throw new Error('Not connected to FP-10');
     const packet = bleMidiPacket(sysex);
+    const hex    = packet.map((b) => b.toString(16).padStart(2, '0')).join(' ');
+    this.log('ble', `TX: ${hex}`);
     const b64    = bytesToBase64(packet);
     await this.device.writeCharacteristicWithoutResponseForService(
       BLE_MIDI_SERVICE,

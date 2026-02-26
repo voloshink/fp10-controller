@@ -20,7 +20,7 @@
  */
 
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { BleMidiManager, ConnectionStatus } from '../ble/BleMidiManager';
+import { BleMidiManager, ConnectionStatus, LogFn } from '../ble/BleMidiManager';
 import { Device } from 'react-native-ble-plx';
 
 // ─── Public shape ─────────────────────────────────────────────────────────────
@@ -30,6 +30,8 @@ export interface BleMidiState {
   status:        ConnectionStatus;
   statusMessage: string;
   isConnected:   boolean;
+  /** Pass this to BleMidiManager so it logs through your useLogger instance. */
+  setLogFn:      (fn: LogFn) => void;
 
   // piano controls
   tempo:        number;
@@ -61,8 +63,15 @@ export function useBleMidi(): BleMidiState {
 
   // ── Lifecycle ──────────────────────────────────────────────────────────────
 
+  const logFnRef = useRef<LogFn | undefined>(undefined);
+
+  const setLogFn = useCallback((fn: LogFn) => {
+    logFnRef.current = fn;
+    mgrRef.current?.setLogFn(fn);
+  }, []);
+
   useEffect(() => {
-    const mgr = new BleMidiManager();
+    const mgr = new BleMidiManager(logFnRef.current);
     mgrRef.current = mgr;
 
     mgr.onDisconnect(() => {
@@ -184,6 +193,7 @@ export function useBleMidi(): BleMidiState {
     status,
     statusMessage,
     isConnected: status === 'connected',
+    setLogFn,
     tempo,
     metronomeOn,
     downbeatOn,

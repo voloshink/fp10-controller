@@ -15,9 +15,11 @@ import {
 import { StatusBar } from 'expo-status-bar';
 
 import { useBleMidi } from './src/hooks/useBleMidi';
+import { useLogger }  from './src/hooks/useLogger';
 import { ConnectionCard } from './src/components/ConnectionCard';
 import { TempoControl }   from './src/components/TempoControl';
 import { ToggleCard }     from './src/components/ToggleCard';
+import { DebugLog }       from './src/components/DebugLog';
 import { Colors, Typography, Spacing, Radius } from './src/theme';
 
 // ─── Piano-key decorative strip ───────────────────────────────────────────────
@@ -79,7 +81,14 @@ const keys = StyleSheet.create({
 // ─── Main screen ──────────────────────────────────────────────────────────────
 
 export default function App() {
-  const midi = useBleMidi();
+  const midi   = useBleMidi();
+  const logger = useLogger();
+
+  // Wire the logger into the BLE manager once on mount
+  React.useEffect(() => {
+    midi.setLogFn(logger.log);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   return (
     <SafeAreaView style={styles.root}>
@@ -140,6 +149,9 @@ export default function App() {
           onToggle={() => midi.setDownbeatOn(!midi.downbeatOn)}
           disabled={!midi.isConnected}
         />
+
+        {/* ── Debug log ── */}
+        <DebugLog entries={logger.entries} onClear={logger.clear} />
 
         {/* ── Footer ── */}
         <Text style={styles.footer}>

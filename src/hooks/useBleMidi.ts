@@ -81,24 +81,48 @@ export function useBleMidi(): BleMidiState {
     });
 
     // ── Piano → app parameter updates ──────────────────────────────────────
+    //
+    // The piano broadcasts state changes proactively after every write (ours
+    // or from the physical controls) on these addresses, confirmed by
+    // PacketLogger capture on Feb 27:
+    //
+    //  01 00 01 08 — BPM, 2-byte 7-bit: BPM = data[0] × 128 + data[1]
+    //               This fires after every tempo change (knob, app, or ours).
+    //
+    //  01 00 01 0F — Metronome on/off: 0x00 = off, 0x01 = on
+    //               This fires after every metronome toggle.
+    //
     const handleParam: ParamCallback = (addr, data) => {
       const key = addr.map(b => b.toString(16).padStart(2, '0')).join('');
-      const val = data[0];
-      if (val === undefined) return;
 
       switch (key) {
-        case '01000309': // BPM — data byte may be > 127 for high tempos
-          if (val >= 20 && val <= 240) setTempo(val);
+        case '01000108': {
+          // BPM broadcast — 2-byte 7-bit Roland encoding
+          if (data.length < 2) break;
+          const bpm = data[0] * 128 + data[1];
+          if (bpm >= 20 && bpm <= 240) setTempo(bpm);
           break;
-        case '01000509': // metronome on/off (0x00 = off, anything else = on)
-          setMetronome(val !== 0x00);
+        }
+        case '0100010f':
+          // Metronome state — 0x00 = off, 0x01 = on
+          if (data.length >= 1) setMetronome(data[0] === 0x01);
           break;
-        case '01000223': // downbeat
-          setDownbeat(val === 0x01);
+
+        case '01000223':
+          // Downbeat — direct set: 0x01 = on, 0x00 = off
+          if (data.length >= 1) setDownbeat(data[0] === 0x01);
           break;
-        // Unknown addresses are still logged by BleMidiManager — useful for
-        // discovering new parameters via PacketLogger.
+
+        // Keep legacy cases in case the piano also notifies on write addresses
+        case '01000309':
+          if (data.length >= 1 && data[0] >= 20 && data[0] <= 127) setTempo(data[0]);
+          break;
+        case '01000509':
+          if (data.length >= 1) setMetronome(data[0] !== 0x00);
+          break;
       }
+      // All addresses (including unknown ones) are already logged by
+      // BleMidiManager as "DT1 ← addr=[…] data=[…]".
     };
     mgr.onParam(handleParam);
 

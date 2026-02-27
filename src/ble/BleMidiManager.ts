@@ -434,6 +434,12 @@ export class BleMidiManager {
 
     // Wait for piano to process and send responses
     await new Promise<void>(resolve => setTimeout(resolve, 500));
+
+    // Step 5 — Diagnostic: read metronome state to verify DT1 address
+    this.log('info', 'Reading metronome state…');
+    await this.writeSysEx(buildRQ1([0x01, 0x00, 0x05, 0x09], [0x00, 0x00, 0x00, 0x01]));
+    await new Promise<void>(resolve => setTimeout(resolve, 500));
+
     this.log('info', 'Piano ready');
 
     this.disconnectSub?.remove();
@@ -507,10 +513,14 @@ export class BleMidiManager {
   }
 
   async sendMetronomeToggle(): Promise<void> {
-    // 0x71 = Roland "toggle" value for on/off parameters.
-    // Must be a single data byte — [0x00, 0x71] incorrectly writes 0x00 to the
-    // metronome (turning it OFF) and 0x71 to the next address.
-    await this.writeSysEx(buildDT1([0x01, 0x00, 0x05, 0x09], [0x71]));
+    // DEBUG: try explicit ON (0x01) instead of toggle (0x71).
+    // After sending, read back the state to verify DT1 was processed.
+    this.log('info', 'Metronome: sending ON (0x01)…');
+    await this.writeSysEx(buildDT1([0x01, 0x00, 0x05, 0x09], [0x01]));
+    // Read back
+    await new Promise<void>(resolve => setTimeout(resolve, 200));
+    this.log('info', 'Metronome: reading back state…');
+    await this.writeSysEx(buildRQ1([0x01, 0x00, 0x05, 0x09], [0x00, 0x00, 0x00, 0x01]));
   }
 
   async sendDownbeat(on: boolean): Promise<void> {

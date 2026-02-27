@@ -305,7 +305,6 @@ export class BleMidiManager {
     this.device = connected;
     this.rx.reset();
 
-    // Notification callback — reused for both CCCD writes below.
     const onNotify = (error: BleError | null, char: Characteristic | null) => {
       if (error) { this.log('warn', `MIDI RX error: ${error.message}`); return; }
       if (!char?.value) return;
@@ -317,52 +316,18 @@ export class BleMidiManager {
     };
 
     // ── FP-10 initialization sequence ────────────────────────────────────────
-    // The piano has a power-on state machine that ignores DT1 writes until
-    // a specific handshake is complete.  Observed via PacketLogger from the
-    // Roland Piano Partner 2 app:
+    // PacketLogger trace of Roland Piano Partner 2 (Feb 27 2026) shows the
+    // piano requires a specific ATT-level sequence before it accepts commands:
     //
-    //   1. Write CCCD = 0x0001  (enables notifications)
-    //   2. Read Manufacturer Name characteristic
-    //   3. Send TWO MIDI-CI Discovery SysEx  (F0 7E 7F 0D 70 … × 2)
-    //   4. Wait ~10 s  (MIDI-CI response timeout in Roland app)
-    //   5. Read the MIDI characteristic  (ATT Read Request)
-    //   6. Write CCCD = 0x0001  (second — completes initialization)
+    //   1. ATT Read Request on the MIDI characteristic (Handle:0x0010)
+    //   2. Write CCCD = 0x0001  (enable notifications)
+    //   3. Send RQ1/DT1 commands — piano responds immediately
     //
-    // iOS does not allow direct CCCD descriptor writes — CoreBluetooth
-    // manages CCCD internally via setNotifyValue:.  The only way to trigger
-    // a CCCD write is monitor → remove → re-monitor.
+    // No MIDI-CI, no second CCCD write, no delays.  The key is reading the
+    // MIDI characteristic BEFORE enabling notifications.  Without this read,
+    // the piano silently discards every DT1 command until power-cycled.
 
-    // Step 1 — first CCCD write (monitor → setNotifyValue:true → CCCD=0x0001)
-    this.midiNotifySub?.remove();
-    this.midiNotifySub = connected.monitorCharacteristicForService(
-      BLE_MIDI_SERVICE, BLE_MIDI_CHARACTERISTIC, onNotify,
-    );
-    this.log('info', 'MIDI notifications enabled (1/2)');
-
-    // Step 2 — Read Manufacturer Name (matches Roland app sequence)
-    try {
-      const mfr = await this.ble.readCharacteristicForDevice(
-        connected.id,
-        '0000180a-0000-1000-8000-00805f9b34fb', // Device Information Service
-        '00002a29-0000-1000-8000-00805f9b34fb', // Manufacturer Name String
-      );
-      const mfrName = mfr.value
-        ? String.fromCharCode(...base64ToBytes(mfr.value))
-        : '(null)';
-      this.log('ble', `Manufacturer Name: ${mfrName}`);;
-    } catch (e: any) {
-      this.log('warn', `Read Manufacturer Name failed: ${e.message}`);
-    }
-
-    // Step 3 — TWO MIDI-CI Discovery SysEx (Roland app sends 2, 4 ATT packets)
-    await this.sendMidiCiDiscovery(connected);
-    await this.sendMidiCiDiscovery(connected);
-
-    // Step 4 — wait for piano to process MIDI-CI
-    this.log('info', 'Waiting 10 s for piano init (MIDI-CI processing)…');
-    await new Promise<void>(resolve => setTimeout(resolve, 10_000));
-
-    // Step 5 — Read the MIDI characteristic (matches Roland app sequence)
+    // Step 1 — Read the MIDI characteristic (BEFORE enabling notifications)
     try {
       const readResult = await this.ble.readCharacteristicForDevice(
         connected.id, BLE_MIDI_SERVICE, BLE_MIDI_CHARACTERISTIC,
@@ -372,15 +337,12 @@ export class BleMidiManager {
       this.log('warn', `Read MIDI char failed: ${e.message}`);
     }
 
-    // Step 6 — second CCCD write via remove → delay → re-monitor
-    this.midiNotifySub.remove();
-    this.log('info', 'Notifications disabled, waiting before re-enable…');
-    await new Promise<void>(resolve => setTimeout(resolve, 500));
-
+    // Step 2 — Enable notifications (single CCCD write)
+    this.midiNotifySub?.remove();
     this.midiNotifySub = connected.monitorCharacteristicForService(
       BLE_MIDI_SERVICE, BLE_MIDI_CHARACTERISTIC, onNotify,
     );
-    this.log('info', 'MIDI notifications re-enabled (2/2) — piano ready');
+    this.log('info', 'MIDI notifications enabled — piano ready');
 
     this.disconnectSub?.remove();
     this.disconnectSub = this.ble.onDeviceDisconnected(connected.id, () => {
@@ -403,65 +365,6 @@ export class BleMidiManager {
   }
 
   get isConnected() { return this.device !== null; }
-
-  // ── MIDI-CI initialization ────────────────────────────────────────────────
-
-  /**
-   * Send a MIDI-CI Discovery SysEx to wake the FP-10 out of its power-on
-   * initialization mode.
-   *
-   * Full SysEx (31 bytes):
-   *   F0 7E 7F 0D 70  Non-Realtime Universal, all-call, MIDI-CI Discovery
-   *   02              MIDI-CI version 2
-   *   01 02 03 04     source MUID  (arbitrary, each byte < 0x80)
-   *   7F 7F 7F 7F     destination MUID  (broadcast / all-call)
-   *   41 00 00        manufacturer: Roland  (1-byte ID, 3-byte CI encoding)
-   *   00 00           device family
-   *   00 00           device model
-   *   00 00 00 00     software revision
-   *   00              capability categories
-   *   00 00 01 00     max SysEx size (256 bytes)
-   *   F7
-   *
-   * Must be split into two ≤20-byte ATT payloads (the FP-10 uses the default
-   * 23-byte ATT MTU → 20 bytes usable payload, matching the Roland app's
-   * observed packet sizes in PacketLogger).
-   *
-   *   Packet 1 (20 bytes): [BLE-MIDI hdr+ts] + SysEx bytes 1-18
-   *   Packet 2 (15 bytes): [BLE-MIDI hdr]    + SysEx bytes 19-30 + [ts] + F7
-   */
-  private async sendMidiCiDiscovery(device: Device): Promise<void> {
-    const write = (bytes: number[]) =>
-      device.writeCharacteristicWithoutResponseForService(
-        BLE_MIDI_SERVICE, BLE_MIDI_CHARACTERISTIC, bytesToBase64(bytes),
-      );
-
-    // Packet 1 — BLE MIDI header + timestamp + first 18 SysEx bytes
-    const p1 = [
-      0x80, 0x80,                              // BLE-MIDI header, timestamp
-      0xf0, 0x7e, 0x7f, 0x0d, 0x70, 0x02,     // MIDI-CI Discovery, version 2
-      0x01, 0x02, 0x03, 0x04,                  // source MUID
-      0x7f, 0x7f, 0x7f, 0x7f,                  // destination MUID (broadcast)
-      0x41, 0x00, 0x00,                         // manufacturer: Roland
-      0x00,                                     // device family byte 1
-    ]; // 20 bytes
-
-    // Packet 2 — BLE MIDI header + remaining 12 SysEx bytes + timestamp + F7
-    const p2 = [
-      0x80,                                     // BLE-MIDI header (continuation)
-      0x00,                                     // device family byte 2
-      0x00, 0x00,                               // device model
-      0x00, 0x00, 0x00, 0x00,                   // software revision
-      0x00,                                     // capability categories
-      0x00, 0x00, 0x01, 0x00,                   // max SysEx size
-      0x80, 0xf7,                               // timestamp + F7
-    ]; // 15 bytes
-
-    this.log('ble', `TX MIDI-CI p1: ${hex(p1)}`);
-    await write(p1);
-    this.log('ble', `TX MIDI-CI p2: ${hex(p2)}`);
-    await write(p2);
-  }
 
   // ── SysEx RX parser ───────────────────────────────────────────────────────
 

@@ -330,8 +330,14 @@ export class BleMidiManager {
     // appears to trigger its transition out of "initialization mode".  Without
     // this sequence the piano silently discards every DT1 Write Command.
     // This state persists across reconnections until the piano is power-cycled.
+    //
+    // IMPORTANT: The second CCCD write must NOT tear down the first
+    // subscription.  react-native-ble-plx's .remove() writes CCCD = 0x0000
+    // (disabling notifications) before re-enabling — the piano sees a disable
+    // instead of a second enable, and the handshake fails.  We write the CCCD
+    // descriptor directly for step 4.
 
-    // Step 1 — first CCCD write
+    // Step 1 — first CCCD write (monitorCharacteristic writes CCCD = 0x0001)
     this.midiNotifySub?.remove();
     this.midiNotifySub = connected.monitorCharacteristicForService(
       BLE_MIDI_SERVICE, BLE_MIDI_CHARACTERISTIC, onNotify,
@@ -344,12 +350,18 @@ export class BleMidiManager {
     // Step 3 — wait for piano to process / time out internally
     await new Promise<void>(resolve => setTimeout(resolve, 400));
 
-    // Step 4 — second CCCD write (completes handshake)
-    this.midiNotifySub?.remove();
-    this.midiNotifySub = connected.monitorCharacteristicForService(
-      BLE_MIDI_SERVICE, BLE_MIDI_CHARACTERISTIC, onNotify,
+    // Step 4 — second CCCD write directly to descriptor (no tear-down)
+    // CCCD UUID = 0x2902, value = 0x0001 (little-endian: notifications enabled)
+    const CCCD_UUID  = '00002902-0000-1000-8000-00805f9b34fb';
+    const CCCD_VALUE = bytesToBase64([0x01, 0x00]); // 0x0001 LE = notifications
+    await this.ble.writeDescriptorForDevice(
+      connected.id,
+      BLE_MIDI_SERVICE,
+      BLE_MIDI_CHARACTERISTIC,
+      CCCD_UUID,
+      CCCD_VALUE,
     );
-    this.log('info', 'MIDI notifications enabled (2/2) — piano ready');
+    this.log('info', 'CCCD re-written (2/2) — piano ready');
 
     this.disconnectSub?.remove();
     this.disconnectSub = this.ble.onDeviceDisconnected(connected.id, () => {

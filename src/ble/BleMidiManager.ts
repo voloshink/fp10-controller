@@ -98,24 +98,21 @@ function buildDT1(addr: number[], dataBytes: number[]): number[] {
   return [...ROLAND_HEADER, ...addr, ...dataBytes, cs, 0xf7];
 }
 
-/** Roland RQ1 read-request SysEx (size = number of bytes to read) */
-function buildRQ1(addr: number[], size = 1): number[] {
-  const sizeBytes = [0x00, 0x00, 0x00, size];
+/** Roland RQ1 read-request SysEx (sizeBytes = 4-byte size field) */
+function buildRQ1(addr: number[], sizeBytes: number[]): number[] {
   const cs = rolandChecksum([...addr, ...sizeBytes]);
   return [...ROLAND_HEADER_RQ, ...addr, ...sizeBytes, cs, 0xf7];
 }
 
+/** Max ATT payload for BLE-MIDI Write Without Response (MTU 23 − 3). */
+const BLE_MIDI_MTU = 20;
+
 /**
  * BLE-MIDI 13-bit timestamp from the current time.
  * Returns [headerByte, timestampByte] with bit 7 set on both.
- *
- * The Roland FP-10 appears to reject BLE-MIDI packets with zero timestamps
- * (header=0x80, ts=0x80).  All Roland Piano Partner 2 packets use non-zero
- * timestamps.  The BLE-MIDI spec says zero is valid, but the piano's
- * firmware disagrees.
  */
 function bleMidiTimestamp(): [number, number] {
-  const ms = Date.now() % 8192; // 13-bit millisecond timestamp
+  const ms = Date.now() % 8192;
   const header = 0x80 | ((ms >> 7) & 0x3f);
   const ts     = 0x80 | (ms & 0x7f);
   return [header, ts];
@@ -123,14 +120,60 @@ function bleMidiTimestamp(): [number, number] {
 
 /**
  * BLE-MIDI TX framing: wrap a SysEx with header + timestamps.
- * Inserts a timestamp byte before both F0 (at position 0) and F7.
+ *
+ * Returns an array of packets (each ≤ BLE_MIDI_MTU bytes).
+ * CoreBluetooth silently drops WriteWithoutResponse values that exceed
+ * the negotiated ATT MTU.  The FP-10 negotiates MTU 23 (20 byte payload).
+ * Roland Piano Partner 2 splits SysEx across multiple writes at this limit.
+ *
+ * Single-packet: [header, ts, F0, data…, ts, F7]
+ * Multi-packet:  [header, ts, F0, data…]  +  [header, ts, F7]
+ *                (continuation packets for longer messages in between)
  */
-function bleMidiWrap(sysex: number[]): number[] {
+function bleMidiWrap(sysex: number[]): number[][] {
   const [header, ts] = bleMidiTimestamp();
-  if (sysex[sysex.length - 1] === 0xf7) {
-    return [header, ts, ...sysex.slice(0, -1), ts, 0xf7];
+
+  if (sysex[sysex.length - 1] !== 0xf7) {
+    // Not a complete SysEx — just prefix with header+ts
+    return [[header, ts, ...sysex]];
   }
-  return [header, ts, ...sysex];
+
+  // Complete SysEx — try single packet first
+  const body = sysex.slice(0, -1); // everything except F7
+  const single = [header, ts, ...body, ts, 0xf7];
+  if (single.length <= BLE_MIDI_MTU) {
+    return [single];
+  }
+
+  // Must split.  First packet: [header, ts, F0, body_data…]
+  // Last packet:  [header, ts, F7]
+  // (middle continuation packets if needed: [header, body_data…])
+  const packets: number[][] = [];
+  const firstMax = BLE_MIDI_MTU - 2; // header + ts take 2 bytes
+  packets.push([header, ts, ...body.slice(0, firstMax)]);
+  let offset = firstMax;
+
+  while (offset < body.length) {
+    const remaining = body.length - offset;
+    const lastPacketDataCap = BLE_MIDI_MTU - 3; // header + ts + F7
+    if (remaining <= lastPacketDataCap) {
+      // Fits in last packet with ts+F7
+      packets.push([header, ...body.slice(offset), ts, 0xf7]);
+      offset = body.length;
+    } else {
+      // Middle continuation: [header, data…]
+      const chunk = BLE_MIDI_MTU - 1; // header takes 1 byte
+      packets.push([header, ...body.slice(offset, offset + chunk)]);
+      offset += chunk;
+    }
+  }
+
+  // If body fit exactly in first packet(s), still need the F7 packet
+  if (packets[packets.length - 1][packets[packets.length - 1].length - 1] !== 0xf7) {
+    packets.push([header, ts, 0xf7]);
+  }
+
+  return packets;
 }
 
 // ─── BLE-MIDI RX reassembler ──────────────────────────────────────────────────
@@ -265,43 +308,38 @@ export class BleMidiManager {
     cb: ScanCallbacks,
     tid: ReturnType<typeof setTimeout>,
   ) {
-    // ── Drop any stale iOS auto-reconnect ────────────────────────────────
-    // iOS auto-reconnects to bonded BLE peripherals.  If the FP-10 is
-    // already connected, the piano's MIDI processor hasn't initialized
-    // (it only initializes on a NEW connection event).  We must tear down
-    // the stale link so the piano starts advertising again, then connect
-    // fresh via scan.
-    this.log('info', 'Dropping any stale BLE connection to FP-10…');
-    for (const id of KNOWN_PERIPHERAL_UUIDS) {
-      try {
-        await this.ble.cancelDeviceConnection(id);
-        this.log('info', `Cancelled existing connection: ${id}`);
-      } catch (_) { /* not connected — fine */ }
-    }
-    // Also try via connectedDevices in case the UUID isn't in our list
+    // 1. Already connected (iOS auto-reconnect to bonded devices)
+    this.log('info', 'Checking already-connected BLE MIDI devices…');
     try {
       for (const d of await this.ble.connectedDevices([BLE_MIDI_SERVICE])) {
-        const name = d.name ?? d.localName ?? '';
+        const name = d.name ?? d.localName ?? '(no name)';
+        this.log('ble', `Already connected: "${name}"  id=${d.id}`);
         if (name === TARGET_NAME || d.localName === TARGET_NAME) {
-          this.log('info', `Cancelling auto-connected "${name}"…`);
-          try { await this.ble.cancelDeviceConnection(d.id); } catch (_) {}
+          clearTimeout(tid); done(() => cb.onFound(d)); return;
         }
       }
-    } catch (_) {}
+    } catch (e) { this.log('warn', `connectedDevices error: ${e}`); }
 
-    // Wait for the BLE stack to fully disconnect and the piano to start
-    // advertising again.
-    await new Promise<void>(resolve => setTimeout(resolve, 2000));
+    // 2. CoreBluetooth cache
+    this.log('info', 'Checking CoreBluetooth cache…');
+    try {
+      for (const d of await this.ble.devices(KNOWN_PERIPHERAL_UUIDS)) {
+        const name = d.name ?? d.localName ?? '(no name)';
+        this.log('ble', `Cached: "${name}"  id=${d.id}`);
+        if (name === TARGET_NAME || d.localName === TARGET_NAME) {
+          clearTimeout(tid); done(() => cb.onFound(d)); return;
+        }
+      }
+    } catch (e) { this.log('warn', `devices cache error: ${e}`); }
 
-    // Live scan only — do NOT use connectedDevices() or cache, as those
-    // return stale device objects tied to the old connection.
+    // 3. Live scan
     this.log('info', 'Starting live BLE scan…');
     this.ble.startDeviceScan(null, { allowDuplicates: false }, (err, device) => {
       if (err) { clearTimeout(tid); done(() => cb.onError(err)); return; }
       if (device) {
         const name = device.name ?? device.localName ?? '(no name)';
+        this.log('ble', `Found: "${name}"  id=${device.id}`);
         if (name === TARGET_NAME || device.localName === TARGET_NAME) {
-          this.log('info', `Found FP-10 via scan: id=${device.id}`);
           clearTimeout(tid); done(() => cb.onFound(device));
         }
       }
@@ -366,7 +404,32 @@ export class BleMidiManager {
     this.midiNotifySub = connected.monitorCharacteristicForService(
       BLE_MIDI_SERVICE, BLE_MIDI_CHARACTERISTIC, onNotify,
     );
-    this.log('info', 'MIDI notifications enabled — piano ready');
+    this.log('info', 'MIDI notifications enabled');
+
+    // Brief pause so the CCCD write completes on the wire before we send data
+    await new Promise<void>(resolve => setTimeout(resolve, 200));
+
+    // Step 3 — Send RQ1 bulk reads (matches Roland Piano Partner 2 init)
+    //
+    // The piano requires RQ1 initialization before accepting DT1 commands.
+    // Roland sends two RQ1 reads; the piano responds with DT1 notifications
+    // and enters operational mode.
+    //
+    // CRITICAL: RQ1 SysEx is 18 bytes → BLE-MIDI wrapped = 21 bytes.
+    // This exceeds the 20-byte ATT payload limit (FP-10 MTU=23).
+    // CoreBluetooth silently drops WriteWithoutResponse values > MTU.
+    // bleMidiWrap() now splits into two packets (≤20 + 3), matching Roland.
+    //
+    // Sizes derived from Roland's DT1 responses:
+    //   [01,00,07,00] → 8 data bytes  → size [0,0,0,8]
+    //   [01,00,08,00] → 1 data byte   → size [0,0,0,1]
+    this.log('info', 'Sending RQ1 init sequence…');
+    await this.writeSysEx(buildRQ1([0x01, 0x00, 0x07, 0x00], [0x00, 0x00, 0x00, 0x08]));
+    await this.writeSysEx(buildRQ1([0x01, 0x00, 0x08, 0x00], [0x00, 0x00, 0x00, 0x01]));
+
+    // Wait for piano to process and send DT1 response notifications
+    await new Promise<void>(resolve => setTimeout(resolve, 500));
+    this.log('info', 'Piano ready');
 
     this.disconnectSub?.remove();
     this.disconnectSub = this.ble.onDeviceDisconnected(connected.id, () => {
@@ -417,11 +480,13 @@ export class BleMidiManager {
 
   private async writeSysEx(sysex: number[]): Promise<void> {
     if (!this.device) throw new Error('Not connected to FP-10');
-    const packet = bleMidiWrap(sysex);
-    this.log('ble', `TX: ${hex(packet)}`);
-    await this.device.writeCharacteristicWithoutResponseForService(
-      BLE_MIDI_SERVICE, BLE_MIDI_CHARACTERISTIC, bytesToBase64(packet),
-    );
+    const packets = bleMidiWrap(sysex);
+    for (const pkt of packets) {
+      this.log('ble', `TX: ${hex(pkt)} (${pkt.length}B)`);
+      await this.device.writeCharacteristicWithoutResponseForService(
+        BLE_MIDI_SERVICE, BLE_MIDI_CHARACTERISTIC, bytesToBase64(pkt),
+      );
+    }
   }
 
   // ── FP-10 write commands ───────────────────────────────────────────────────
@@ -459,9 +524,10 @@ export class BleMidiManager {
    * Response arrives via the onParam callback.
    * Only call this with confirmed readable addresses.
    */
-  async requestParam(addr: number[]): Promise<void> {
-    const sysex = buildRQ1(addr, 1);
-    this.log('ble', `RQ1 → addr=[${hex(addr)}]`);
+  async requestParam(addr: number[], size = 1): Promise<void> {
+    const sizeBytes = [0x00, 0x00, 0x00, size];
+    const sysex = buildRQ1(addr, sizeBytes);
+    this.log('ble', `RQ1 → addr=[${hex(addr)}] size=${size}`);
     await this.writeSysEx(sysex);
   }
 }

@@ -322,16 +322,15 @@ export class BleMidiManager {
     // Roland Piano Partner 2 app:
     //
     //   1. Write CCCD = 0x0001  (enables notifications)
-    //   2. Send MIDI-CI Discovery SysEx  (F0 7E 7F 0D 70 …)
-    //   3. Wait ~10 s  (MIDI-CI response timeout in Roland app)
-    //   4. Read the MIDI characteristic  (ATT Read Request)
-    //   5. Write CCCD = 0x0001  (second — completes initialization)
+    //   2. Read Manufacturer Name characteristic
+    //   3. Send TWO MIDI-CI Discovery SysEx  (F0 7E 7F 0D 70 … × 2)
+    //   4. Wait ~10 s  (MIDI-CI response timeout in Roland app)
+    //   5. Read the MIDI characteristic  (ATT Read Request)
+    //   6. Write CCCD = 0x0001  (second — completes initialization)
     //
     // iOS does not allow direct CCCD descriptor writes — CoreBluetooth
     // manages CCCD internally via setNotifyValue:.  The only way to trigger
-    // a CCCD write is monitor → remove (CCCD=0x0000) → re-monitor
-    // (CCCD=0x0001).  A delay between remove and re-monitor is required
-    // to avoid a BLE stack race condition ("notify change failed").
+    // a CCCD write is monitor → remove → re-monitor.
 
     // Step 1 — first CCCD write (monitor → setNotifyValue:true → CCCD=0x0001)
     this.midiNotifySub?.remove();
@@ -340,17 +339,30 @@ export class BleMidiManager {
     );
     this.log('info', 'MIDI notifications enabled (1/2)');
 
-    // Step 2 — MIDI-CI Discovery
+    // Step 2 — Read Manufacturer Name (matches Roland app sequence)
+    try {
+      const mfr = await this.ble.readCharacteristicForDevice(
+        connected.id,
+        '0000180a-0000-1000-8000-00805f9b34fb', // Device Information Service
+        '00002a29-0000-1000-8000-00805f9b34fb', // Manufacturer Name String
+      );
+      const mfrName = mfr.value
+        ? String.fromCharCode(...base64ToBytes(mfr.value))
+        : '(null)';
+      this.log('ble', `Manufacturer Name: ${mfrName}`);;
+    } catch (e: any) {
+      this.log('warn', `Read Manufacturer Name failed: ${e.message}`);
+    }
+
+    // Step 3 — TWO MIDI-CI Discovery SysEx (Roland app sends 2, 4 ATT packets)
+    await this.sendMidiCiDiscovery(connected);
     await this.sendMidiCiDiscovery(connected);
 
-    // Step 3 — wait for piano to process MIDI-CI
-    // The Roland app waits ~10 s here (its MIDI-CI response timeout).
-    // The piano appears to need this delay before the Read + second CCCD
-    // will complete the state transition.  1 s was not enough.
+    // Step 4 — wait for piano to process MIDI-CI
     this.log('info', 'Waiting 10 s for piano init (MIDI-CI processing)…');
     await new Promise<void>(resolve => setTimeout(resolve, 10_000));
 
-    // Step 4 — Read the MIDI characteristic (matches Roland app sequence)
+    // Step 5 — Read the MIDI characteristic (matches Roland app sequence)
     try {
       const readResult = await this.ble.readCharacteristicForDevice(
         connected.id, BLE_MIDI_SERVICE, BLE_MIDI_CHARACTERISTIC,
@@ -360,13 +372,11 @@ export class BleMidiManager {
       this.log('warn', `Read MIDI char failed: ${e.message}`);
     }
 
-    // Step 5 — second CCCD write via remove → delay → re-monitor
-    // remove() calls cancelTransaction → setNotifyValue:false → CCCD=0x0000
+    // Step 6 — second CCCD write via remove → delay → re-monitor
     this.midiNotifySub.remove();
     this.log('info', 'Notifications disabled, waiting before re-enable…');
     await new Promise<void>(resolve => setTimeout(resolve, 500));
 
-    // re-monitor → setNotifyValue:true → CCCD=0x0001 (second write)
     this.midiNotifySub = connected.monitorCharacteristicForService(
       BLE_MIDI_SERVICE, BLE_MIDI_CHARACTERISTIC, onNotify,
     );

@@ -223,9 +223,11 @@ export function useBleMidi(): BleMidiState {
   // ── Metronome ──────────────────────────────────────────────────────────────
 
   const toggleMetronome = useCallback(() => {
-    // Flip local mirror; the BLE command is always the same (0x71 toggle),
-    // so we don't need to read the new state before sending.
-    setMetronome((prev) => !prev);
+    // Do NOT optimistically flip state here. The piano echoes the authoritative
+    // new state via DT1 notification at 01 00 01 0F (~60 ms later), which
+    // handleParam uses to call setMetronome(). Optimistically flipping causes
+    // a visible revert whenever app state is out of sync with the piano (e.g.
+    // after reconnecting while the piano's metronome was already on).
     mgrRef.current?.sendMetronomeToggle().catch((e) =>
       console.warn('[FP-10] sendMetronomeToggle failed:', e),
     );

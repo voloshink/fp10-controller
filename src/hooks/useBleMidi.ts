@@ -113,10 +113,17 @@ export function useBleMidi(): BleMidiState {
           if (data.length >= 1) setDownbeat(data[0] === 0x01);
           break;
 
-        // Keep legacy cases in case the piano also notifies on write addresses
-        case '01000309':
-          if (data.length >= 1 && data[0] >= 20 && data[0] <= 127) setTempo(data[0]);
+        // Legacy cases — if the piano echoes on the write addresses too
+        case '01000309': {
+          // Same 2-byte 7-bit encoding as 01 00 01 08
+          if (data.length >= 2) {
+            const bpm = data[0] * 128 + data[1];
+            if (bpm >= 20 && bpm <= 240) setTempo(bpm);
+          } else if (data.length === 1 && data[0] >= 20 && data[0] <= 127) {
+            setTempo(data[0]);
+          }
           break;
+        }
         case '01000509':
           if (data.length >= 1) setMetronome(data[0] !== 0x00);
           break;

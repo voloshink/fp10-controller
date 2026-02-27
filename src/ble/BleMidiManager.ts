@@ -85,10 +85,17 @@ function rolandChecksum(dataBytes: number[]): number {
   return (128 - (sum % 128)) % 128;
 }
 
-/** Roland DT1 write SysEx */
-function buildDT1(addr: number[], value: number): number[] {
-  const cs = rolandChecksum([...addr, value]);
-  return [...ROLAND_HEADER, ...addr, 0x00, value, cs, 0xf7];
+/**
+ * Roland DT1 write SysEx.
+ *
+ * dataBytes is the full data field (1 or more 7-bit bytes).  All bytes
+ * must be ≤ 0x7F — SysEx data bytes with bit 7 set are illegal (the piano
+ * silently ignores the command).  Multi-byte values use Roland's 7-bit
+ * encoding: e.g. BPM 150 → [0x01, 0x16] because 1×128 + 22 = 150.
+ */
+function buildDT1(addr: number[], dataBytes: number[]): number[] {
+  const cs = rolandChecksum([...addr, ...dataBytes]);
+  return [...ROLAND_HEADER, ...addr, ...dataBytes, cs, 0xf7];
 }
 
 /** Roland RQ1 read-request SysEx (size = number of bytes to read) */
@@ -375,15 +382,20 @@ export class BleMidiManager {
 
   async sendTempo(bpm: number): Promise<void> {
     const v = Math.max(20, Math.min(240, Math.round(bpm)));
-    await this.writeSysEx(buildDT1([0x01, 0x00, 0x03, 0x09], v));
+    // Roland 7-bit 2-byte encoding: BPM = byte0 × 128 + byte1
+    // This matches how the piano broadcasts BPM (01 00 01 08) and keeps all
+    // SysEx data bytes ≤ 0x7F (required by MIDI spec — higher bytes have
+    // bit 7 set and are interpreted as status bytes, silently aborting SysEx).
+    const data = [Math.floor(v / 128), v % 128];
+    await this.writeSysEx(buildDT1([0x01, 0x00, 0x03, 0x09], data));
   }
 
   async sendMetronomeToggle(): Promise<void> {
-    await this.writeSysEx(buildDT1([0x01, 0x00, 0x05, 0x09], 0x71));
+    await this.writeSysEx(buildDT1([0x01, 0x00, 0x05, 0x09], [0x00, 0x71]));
   }
 
   async sendDownbeat(on: boolean): Promise<void> {
-    await this.writeSysEx(buildDT1([0x01, 0x00, 0x02, 0x23], on ? 0x01 : 0x00));
+    await this.writeSysEx(buildDT1([0x01, 0x00, 0x02, 0x23], [0x00, on ? 0x01 : 0x00]));
   }
 
   // ── FP-10 read requests (RQ1) ─────────────────────────────────────────────

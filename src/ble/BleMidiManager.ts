@@ -265,38 +265,43 @@ export class BleMidiManager {
     cb: ScanCallbacks,
     tid: ReturnType<typeof setTimeout>,
   ) {
-    // 1. Already connected
-    this.log('info', 'Checking already-connected BLE MIDI devices…');
+    // ── Drop any stale iOS auto-reconnect ────────────────────────────────
+    // iOS auto-reconnects to bonded BLE peripherals.  If the FP-10 is
+    // already connected, the piano's MIDI processor hasn't initialized
+    // (it only initializes on a NEW connection event).  We must tear down
+    // the stale link so the piano starts advertising again, then connect
+    // fresh via scan.
+    this.log('info', 'Dropping any stale BLE connection to FP-10…');
+    for (const id of KNOWN_PERIPHERAL_UUIDS) {
+      try {
+        await this.ble.cancelDeviceConnection(id);
+        this.log('info', `Cancelled existing connection: ${id}`);
+      } catch (_) { /* not connected — fine */ }
+    }
+    // Also try via connectedDevices in case the UUID isn't in our list
     try {
       for (const d of await this.ble.connectedDevices([BLE_MIDI_SERVICE])) {
-        const name = d.name ?? d.localName ?? '(no name)';
-        this.log('ble', `Already connected: "${name}"  id=${d.id}`);
+        const name = d.name ?? d.localName ?? '';
         if (name === TARGET_NAME || d.localName === TARGET_NAME) {
-          clearTimeout(tid); done(() => cb.onFound(d)); return;
+          this.log('info', `Cancelling auto-connected "${name}"…`);
+          try { await this.ble.cancelDeviceConnection(d.id); } catch (_) {}
         }
       }
-    } catch (e) { this.log('warn', `connectedDevices error: ${e}`); }
+    } catch (_) {}
 
-    // 2. CoreBluetooth cache
-    this.log('info', 'Checking CoreBluetooth cache…');
-    try {
-      for (const d of await this.ble.devices(KNOWN_PERIPHERAL_UUIDS)) {
-        const name = d.name ?? d.localName ?? '(no name)';
-        this.log('ble', `Cached: "${name}"  id=${d.id}`);
-        if (name === TARGET_NAME || d.localName === TARGET_NAME) {
-          clearTimeout(tid); done(() => cb.onFound(d)); return;
-        }
-      }
-    } catch (e) { this.log('warn', `devices cache error: ${e}`); }
+    // Wait for the BLE stack to fully disconnect and the piano to start
+    // advertising again.
+    await new Promise<void>(resolve => setTimeout(resolve, 2000));
 
-    // 3. Live scan
+    // Live scan only — do NOT use connectedDevices() or cache, as those
+    // return stale device objects tied to the old connection.
     this.log('info', 'Starting live BLE scan…');
     this.ble.startDeviceScan(null, { allowDuplicates: false }, (err, device) => {
       if (err) { clearTimeout(tid); done(() => cb.onError(err)); return; }
       if (device) {
         const name = device.name ?? device.localName ?? '(no name)';
-        this.log('ble', `Found: "${name}"  id=${device.id}`);
         if (name === TARGET_NAME || device.localName === TARGET_NAME) {
+          this.log('info', `Found FP-10 via scan: id=${device.id}`);
           clearTimeout(tid); done(() => cb.onFound(device));
         }
       }
@@ -306,27 +311,6 @@ export class BleMidiManager {
   // ── Connection ─────────────────────────────────────────────────────────────
 
   async connect(device: Device): Promise<void> {
-    // ── Force a FRESH BLE connection ──────────────────────────────────────
-    // iOS auto-reconnects to bonded BLE devices.  If the FP-10 is already
-    // connected (from iOS auto-reconnect), calling device.connect() re-uses
-    // the stale connection — no new BLE connection event reaches the piano,
-    // so its MIDI processor never initializes.  The Roland app always scans
-    // and establishes a fresh connection, which triggers the piano's init.
-    //
-    // Fix: cancel any existing connection first, then connect fresh.
-    // Always cancel any existing connection to force a fresh BLE link.
-    // connectedDevices() may find the FP-10 "already connected" (iOS
-    // auto-reconnect) but device.isConnected() can return false — so
-    // we unconditionally cancel and ignore errors.
-    this.log('info', `Forcing fresh connection to ${device.name ?? device.id}…`);
-    try {
-      await device.cancelConnection();
-      this.log('info', 'Existing connection cancelled');
-    } catch (_) {
-      this.log('info', 'No existing connection to cancel');
-    }
-    await new Promise<void>(resolve => setTimeout(resolve, 1000));
-
     this.log('info', `Connecting to ${device.name ?? device.id}…`);
     const connected = await device.connect({ autoConnect: false });
     this.log('info', 'Connected — discovering services…');

@@ -344,18 +344,7 @@ export class BleMidiManager {
     this.midiNotifySub = connected.monitorCharacteristicForService(
       BLE_MIDI_SERVICE, BLE_MIDI_CHARACTERISTIC, onNotify,
     );
-    this.log('info', 'MIDI notifications enabled');
-
-    // Step 3 — Send RQ1 bulk reads (matches Roland app's first commands)
-    // This may be required to transition the piano from init → operational.
-    // Roland reads system blocks at [01,00,07,00] and [01,00,08,00].
-    this.log('info', 'Sending init RQ1 bulk reads…');
-    await this.requestParam([0x01, 0x00, 0x07, 0x00]);
-    await this.requestParam([0x01, 0x00, 0x08, 0x00]);
-
-    // Give piano time to process and send responses
-    await new Promise<void>(resolve => setTimeout(resolve, 1000));
-    this.log('info', 'Piano ready');
+    this.log('info', 'MIDI notifications enabled — piano ready');
 
     this.disconnectSub?.remove();
     this.disconnectSub = this.ble.onDeviceDisconnected(connected.id, () => {

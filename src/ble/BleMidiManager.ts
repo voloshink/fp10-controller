@@ -31,7 +31,7 @@
  *   Downbeat   01 00 02 23  DT1 value = 0x01 on / 0x00 off
  */
 
-import { BleManager, Device, State } from 'react-native-ble-plx';
+import { BleManager, BleError, Characteristic, Device, State } from 'react-native-ble-plx';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -305,22 +305,51 @@ export class BleMidiManager {
     this.device = connected;
     this.rx.reset();
 
-    // Subscribe to notifications — required before the piano accepts writes
+    // Notification callback — reused for both CCCD writes below.
+    const onNotify = (error: BleError | null, char: Characteristic | null) => {
+      if (error) { this.log('warn', `MIDI RX error: ${error.message}`); return; }
+      if (!char?.value) return;
+      const bytes = base64ToBytes(char.value);
+      this.log('ble', `RX: ${hex(bytes)}`);
+      for (const sysex of this.rx.push(bytes)) {
+        this.handleSysEx(sysex);
+      }
+    };
+
+    // ── FP-10 initialization sequence ────────────────────────────────────────
+    // The piano has a power-on state machine that ignores DT1 writes until
+    // a specific handshake is complete.  Observed via PacketLogger from the
+    // Roland Piano Partner 2 app:
+    //
+    //   1. Write CCCD = 0x0001  (first — enables notifications)
+    //   2. Send MIDI-CI Discovery SysEx  (F0 7E 7F 0D 70 …)
+    //   3. Wait ~400 ms
+    //   4. Write CCCD = 0x0001  (second — completes initialization)
+    //
+    // The FP-10 does not support MIDI-CI, but receiving the Discovery message
+    // appears to trigger its transition out of "initialization mode".  Without
+    // this sequence the piano silently discards every DT1 Write Command.
+    // This state persists across reconnections until the piano is power-cycled.
+
+    // Step 1 — first CCCD write
     this.midiNotifySub?.remove();
     this.midiNotifySub = connected.monitorCharacteristicForService(
-      BLE_MIDI_SERVICE, BLE_MIDI_CHARACTERISTIC,
-      (error, char) => {
-        if (error) { this.log('warn', `MIDI RX error: ${error.message}`); return; }
-        if (!char?.value) return;
-        const bytes = base64ToBytes(char.value);
-        this.log('ble', `RX: ${hex(bytes)}`);
-        // Reassemble and parse any complete SysEx messages
-        for (const sysex of this.rx.push(bytes)) {
-          this.handleSysEx(sysex);
-        }
-      },
+      BLE_MIDI_SERVICE, BLE_MIDI_CHARACTERISTIC, onNotify,
     );
-    this.log('info', 'Subscribed to MIDI notifications');
+    this.log('info', 'MIDI notifications enabled (1/2)');
+
+    // Step 2 — MIDI-CI Discovery
+    await this.sendMidiCiDiscovery(connected);
+
+    // Step 3 — wait for piano to process / time out internally
+    await new Promise<void>(resolve => setTimeout(resolve, 400));
+
+    // Step 4 — second CCCD write (completes handshake)
+    this.midiNotifySub?.remove();
+    this.midiNotifySub = connected.monitorCharacteristicForService(
+      BLE_MIDI_SERVICE, BLE_MIDI_CHARACTERISTIC, onNotify,
+    );
+    this.log('info', 'MIDI notifications enabled (2/2) — piano ready');
 
     this.disconnectSub?.remove();
     this.disconnectSub = this.ble.onDeviceDisconnected(connected.id, () => {
@@ -343,6 +372,65 @@ export class BleMidiManager {
   }
 
   get isConnected() { return this.device !== null; }
+
+  // ── MIDI-CI initialization ────────────────────────────────────────────────
+
+  /**
+   * Send a MIDI-CI Discovery SysEx to wake the FP-10 out of its power-on
+   * initialization mode.
+   *
+   * Full SysEx (31 bytes):
+   *   F0 7E 7F 0D 70  Non-Realtime Universal, all-call, MIDI-CI Discovery
+   *   02              MIDI-CI version 2
+   *   01 02 03 04     source MUID  (arbitrary, each byte < 0x80)
+   *   7F 7F 7F 7F     destination MUID  (broadcast / all-call)
+   *   41 00 00        manufacturer: Roland  (1-byte ID, 3-byte CI encoding)
+   *   00 00           device family
+   *   00 00           device model
+   *   00 00 00 00     software revision
+   *   00              capability categories
+   *   00 00 01 00     max SysEx size (256 bytes)
+   *   F7
+   *
+   * Must be split into two ≤20-byte ATT payloads (the FP-10 uses the default
+   * 23-byte ATT MTU → 20 bytes usable payload, matching the Roland app's
+   * observed packet sizes in PacketLogger).
+   *
+   *   Packet 1 (20 bytes): [BLE-MIDI hdr+ts] + SysEx bytes 1-18
+   *   Packet 2 (15 bytes): [BLE-MIDI hdr]    + SysEx bytes 19-30 + [ts] + F7
+   */
+  private async sendMidiCiDiscovery(device: Device): Promise<void> {
+    const write = (bytes: number[]) =>
+      device.writeCharacteristicWithoutResponseForService(
+        BLE_MIDI_SERVICE, BLE_MIDI_CHARACTERISTIC, bytesToBase64(bytes),
+      );
+
+    // Packet 1 — BLE MIDI header + timestamp + first 18 SysEx bytes
+    const p1 = [
+      0x80, 0x80,                              // BLE-MIDI header, timestamp
+      0xf0, 0x7e, 0x7f, 0x0d, 0x70, 0x02,     // MIDI-CI Discovery, version 2
+      0x01, 0x02, 0x03, 0x04,                  // source MUID
+      0x7f, 0x7f, 0x7f, 0x7f,                  // destination MUID (broadcast)
+      0x41, 0x00, 0x00,                         // manufacturer: Roland
+      0x00,                                     // device family byte 1
+    ]; // 20 bytes
+
+    // Packet 2 — BLE MIDI header + remaining 12 SysEx bytes + timestamp + F7
+    const p2 = [
+      0x80,                                     // BLE-MIDI header (continuation)
+      0x00,                                     // device family byte 2
+      0x00, 0x00,                               // device model
+      0x00, 0x00, 0x00, 0x00,                   // software revision
+      0x00,                                     // capability categories
+      0x00, 0x00, 0x01, 0x00,                   // max SysEx size
+      0x80, 0xf7,                               // timestamp + F7
+    ]; // 15 bytes
+
+    this.log('ble', `TX MIDI-CI p1: ${hex(p1)}`);
+    await write(p1);
+    this.log('ble', `TX MIDI-CI p2: ${hex(p2)}`);
+    await write(p2);
+  }
 
   // ── SysEx RX parser ───────────────────────────────────────────────────────
 

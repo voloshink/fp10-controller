@@ -306,6 +306,27 @@ export class BleMidiManager {
   // ── Connection ─────────────────────────────────────────────────────────────
 
   async connect(device: Device): Promise<void> {
+    // ── Force a FRESH BLE connection ──────────────────────────────────────
+    // iOS auto-reconnects to bonded BLE devices.  If the FP-10 is already
+    // connected (from iOS auto-reconnect), calling device.connect() re-uses
+    // the stale connection — no new BLE connection event reaches the piano,
+    // so its MIDI processor never initializes.  The Roland app always scans
+    // and establishes a fresh connection, which triggers the piano's init.
+    //
+    // Fix: cancel any existing connection first, then connect fresh.
+    this.log('info', `Ensuring fresh connection to ${device.name ?? device.id}…`);
+    try {
+      const isConnected = await device.isConnected();
+      if (isConnected) {
+        this.log('info', 'Device already connected — disconnecting first…');
+        await device.cancelConnection();
+        // Brief pause to let the BLE stack fully tear down
+        await new Promise<void>(resolve => setTimeout(resolve, 500));
+      }
+    } catch (e: any) {
+      this.log('warn', `Pre-disconnect check: ${e.message}`);
+    }
+
     this.log('info', `Connecting to ${device.name ?? device.id}…`);
     const connected = await device.connect({ autoConnect: false });
     this.log('info', 'Connected — discovering services…');

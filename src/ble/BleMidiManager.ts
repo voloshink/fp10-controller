@@ -106,14 +106,31 @@ function buildRQ1(addr: number[], size = 1): number[] {
 }
 
 /**
+ * BLE-MIDI 13-bit timestamp from the current time.
+ * Returns [headerByte, timestampByte] with bit 7 set on both.
+ *
+ * The Roland FP-10 appears to reject BLE-MIDI packets with zero timestamps
+ * (header=0x80, ts=0x80).  All Roland Piano Partner 2 packets use non-zero
+ * timestamps.  The BLE-MIDI spec says zero is valid, but the piano's
+ * firmware disagrees.
+ */
+function bleMidiTimestamp(): [number, number] {
+  const ms = Date.now() % 8192; // 13-bit millisecond timestamp
+  const header = 0x80 | ((ms >> 7) & 0x3f);
+  const ts     = 0x80 | (ms & 0x7f);
+  return [header, ts];
+}
+
+/**
  * BLE-MIDI TX framing: wrap a SysEx with header + timestamps.
- * Inserts a timestamp byte (0x80) before both F0 (at position 0) and F7.
+ * Inserts a timestamp byte before both F0 (at position 0) and F7.
  */
 function bleMidiWrap(sysex: number[]): number[] {
+  const [header, ts] = bleMidiTimestamp();
   if (sysex[sysex.length - 1] === 0xf7) {
-    return [0x80, 0x80, ...sysex.slice(0, -1), 0x80, 0xf7];
+    return [header, ts, ...sysex.slice(0, -1), ts, 0xf7];
   }
-  return [0x80, 0x80, ...sysex];
+  return [header, ts, ...sysex];
 }
 
 // ─── BLE-MIDI RX reassembler ──────────────────────────────────────────────────

@@ -321,23 +321,19 @@ export class BleMidiManager {
     // a specific handshake is complete.  Observed via PacketLogger from the
     // Roland Piano Partner 2 app:
     //
-    //   1. Write CCCD = 0x0001  (first — enables notifications)
+    //   1. Write CCCD = 0x0001  (enables notifications)
     //   2. Send MIDI-CI Discovery SysEx  (F0 7E 7F 0D 70 …)
-    //   3. Wait ~400 ms
-    //   4. Write CCCD = 0x0001  (second — completes initialization)
+    //   3. Wait ~10 s  (MIDI-CI response timeout in Roland app)
+    //   4. Read the MIDI characteristic  (ATT Read Request)
+    //   5. Write CCCD = 0x0001  (second — completes initialization)
     //
-    // The FP-10 does not support MIDI-CI, but receiving the Discovery message
-    // appears to trigger its transition out of "initialization mode".  Without
-    // this sequence the piano silently discards every DT1 Write Command.
-    // This state persists across reconnections until the piano is power-cycled.
-    //
-    // IMPORTANT: The second CCCD write must NOT tear down the first
-    // subscription.  react-native-ble-plx's .remove() writes CCCD = 0x0000
-    // (disabling notifications) before re-enabling — the piano sees a disable
-    // instead of a second enable, and the handshake fails.  We write the CCCD
-    // descriptor directly for step 4.
+    // iOS does not allow direct CCCD descriptor writes — CoreBluetooth
+    // manages CCCD internally via setNotifyValue:.  The only way to trigger
+    // a CCCD write is monitor → remove (CCCD=0x0000) → re-monitor
+    // (CCCD=0x0001).  A delay between remove and re-monitor is required
+    // to avoid a BLE stack race condition ("notify change failed").
 
-    // Step 1 — first CCCD write (monitorCharacteristic writes CCCD = 0x0001)
+    // Step 1 — first CCCD write (monitor → setNotifyValue:true → CCCD=0x0001)
     this.midiNotifySub?.remove();
     this.midiNotifySub = connected.monitorCharacteristicForService(
       BLE_MIDI_SERVICE, BLE_MIDI_CHARACTERISTIC, onNotify,
@@ -347,21 +343,30 @@ export class BleMidiManager {
     // Step 2 — MIDI-CI Discovery
     await this.sendMidiCiDiscovery(connected);
 
-    // Step 3 — wait for piano to process / time out internally
-    await new Promise<void>(resolve => setTimeout(resolve, 400));
+    // Step 3 — wait for piano to process MIDI-CI
+    await new Promise<void>(resolve => setTimeout(resolve, 1000));
 
-    // Step 4 — second CCCD write directly to descriptor (no tear-down)
-    // CCCD UUID = 0x2902, value = 0x0001 (little-endian: notifications enabled)
-    const CCCD_UUID  = '00002902-0000-1000-8000-00805f9b34fb';
-    const CCCD_VALUE = bytesToBase64([0x01, 0x00]); // 0x0001 LE = notifications
-    await this.ble.writeDescriptorForDevice(
-      connected.id,
-      BLE_MIDI_SERVICE,
-      BLE_MIDI_CHARACTERISTIC,
-      CCCD_UUID,
-      CCCD_VALUE,
+    // Step 4 — Read the MIDI characteristic (matches Roland app sequence)
+    try {
+      const readResult = await this.ble.readCharacteristicForDevice(
+        connected.id, BLE_MIDI_SERVICE, BLE_MIDI_CHARACTERISTIC,
+      );
+      this.log('ble', `Read MIDI char: ${readResult.value ?? '(null)'}`);
+    } catch (e: any) {
+      this.log('warn', `Read MIDI char failed: ${e.message}`);
+    }
+
+    // Step 5 — second CCCD write via remove → delay → re-monitor
+    // remove() calls cancelTransaction → setNotifyValue:false → CCCD=0x0000
+    this.midiNotifySub.remove();
+    this.log('info', 'Notifications disabled, waiting before re-enable…');
+    await new Promise<void>(resolve => setTimeout(resolve, 500));
+
+    // re-monitor → setNotifyValue:true → CCCD=0x0001 (second write)
+    this.midiNotifySub = connected.monitorCharacteristicForService(
+      BLE_MIDI_SERVICE, BLE_MIDI_CHARACTERISTIC, onNotify,
     );
-    this.log('info', 'CCCD re-written (2/2) — piano ready');
+    this.log('info', 'MIDI notifications re-enabled (2/2) — piano ready');
 
     this.disconnectSub?.remove();
     this.disconnectSub = this.ble.onDeviceDisconnected(connected.id, () => {

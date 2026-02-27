@@ -316,18 +316,20 @@ export class BleMidiManager {
     };
 
     // ── FP-10 initialization sequence ────────────────────────────────────────
-    // PacketLogger trace of Roland Piano Partner 2 (Feb 27 2026) shows the
-    // piano requires a specific ATT-level sequence before it accepts commands:
+    // PacketLogger traces (Feb 27 2026) show that:
+    //   - Roland app: 10.4 s silence after connect, then Read → CCCD → works
+    //   - Our app:     2.0 s silence after connect, then Read → CCCD → ignored
     //
-    //   1. ATT Read Request on the MIDI characteristic (Handle:0x0010)
-    //   2. Write CCCD = 0x0001  (enable notifications)
-    //   3. Send RQ1/DT1 commands — piano responds immediately
-    //
-    // No MIDI-CI, no second CCCD write, no delays.  The key is reading the
-    // MIDI characteristic BEFORE enabling notifications.  Without this read,
-    // the piano silently discards every DT1 command until power-cycled.
+    // The ATT operations are byte-for-byte identical.  The only difference is
+    // the gap between BLE connection and the first ATT operation.  The piano
+    // appears to need ~10 s after connection to complete its internal init
+    // before it will accept ATT Read / CCCD / commands.
 
-    // Step 1 — Read the MIDI characteristic (BEFORE enabling notifications)
+    // Step 1 — Wait for piano's internal post-connection initialization
+    this.log('info', 'Waiting for piano post-connection init (10 s)…');
+    await new Promise<void>(resolve => setTimeout(resolve, 10_000));
+
+    // Step 2 — Read the MIDI characteristic (BEFORE enabling notifications)
     try {
       const readResult = await this.ble.readCharacteristicForDevice(
         connected.id, BLE_MIDI_SERVICE, BLE_MIDI_CHARACTERISTIC,
@@ -337,7 +339,7 @@ export class BleMidiManager {
       this.log('warn', `Read MIDI char failed: ${e.message}`);
     }
 
-    // Step 2 — Enable notifications (single CCCD write)
+    // Step 3 — Enable notifications (single CCCD write)
     this.midiNotifySub?.remove();
     this.midiNotifySub = connected.monitorCharacteristicForService(
       BLE_MIDI_SERVICE, BLE_MIDI_CHARACTERISTIC, onNotify,

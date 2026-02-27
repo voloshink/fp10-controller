@@ -427,7 +427,12 @@ export class BleMidiManager {
     await this.writeSysEx(buildRQ1([0x01, 0x00, 0x07, 0x00], [0x00, 0x00, 0x00, 0x08]));
     await this.writeSysEx(buildRQ1([0x01, 0x00, 0x08, 0x00], [0x00, 0x00, 0x00, 0x01]));
 
-    // Wait for piano to process and send DT1 response notifications
+    // Step 4 — Identity Request (matches Roland's init sequence)
+    //   F0 7E 10 06 01 F7  (MIDI Identity Request to device 0x10)
+    this.log('info', 'Sending Identity Request…');
+    await this.writeSysEx([0xf0, 0x7e, 0x10, 0x06, 0x01, 0xf7]);
+
+    // Wait for piano to process and send responses
     await new Promise<void>(resolve => setTimeout(resolve, 500));
     this.log('info', 'Piano ready');
 
@@ -502,7 +507,10 @@ export class BleMidiManager {
   }
 
   async sendMetronomeToggle(): Promise<void> {
-    await this.writeSysEx(buildDT1([0x01, 0x00, 0x05, 0x09], [0x00, 0x71]));
+    // 0x71 = Roland "toggle" value for on/off parameters.
+    // Must be a single data byte — [0x00, 0x71] incorrectly writes 0x00 to the
+    // metronome (turning it OFF) and 0x71 to the next address.
+    await this.writeSysEx(buildDT1([0x01, 0x00, 0x05, 0x09], [0x71]));
   }
 
   async sendDownbeat(on: boolean): Promise<void> {

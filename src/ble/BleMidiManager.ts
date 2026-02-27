@@ -314,18 +314,18 @@ export class BleMidiManager {
     // and establishes a fresh connection, which triggers the piano's init.
     //
     // Fix: cancel any existing connection first, then connect fresh.
-    this.log('info', `Ensuring fresh connection to ${device.name ?? device.id}…`);
+    // Always cancel any existing connection to force a fresh BLE link.
+    // connectedDevices() may find the FP-10 "already connected" (iOS
+    // auto-reconnect) but device.isConnected() can return false — so
+    // we unconditionally cancel and ignore errors.
+    this.log('info', `Forcing fresh connection to ${device.name ?? device.id}…`);
     try {
-      const isConnected = await device.isConnected();
-      if (isConnected) {
-        this.log('info', 'Device already connected — disconnecting first…');
-        await device.cancelConnection();
-        // Brief pause to let the BLE stack fully tear down
-        await new Promise<void>(resolve => setTimeout(resolve, 500));
-      }
-    } catch (e: any) {
-      this.log('warn', `Pre-disconnect check: ${e.message}`);
+      await device.cancelConnection();
+      this.log('info', 'Existing connection cancelled');
+    } catch (_) {
+      this.log('info', 'No existing connection to cancel');
     }
+    await new Promise<void>(resolve => setTimeout(resolve, 1000));
 
     this.log('info', `Connecting to ${device.name ?? device.id}…`);
     const connected = await device.connect({ autoConnect: false });

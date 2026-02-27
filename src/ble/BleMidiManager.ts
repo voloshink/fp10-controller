@@ -344,7 +344,11 @@ export class BleMidiManager {
     await this.sendMidiCiDiscovery(connected);
 
     // Step 3 — wait for piano to process MIDI-CI
-    await new Promise<void>(resolve => setTimeout(resolve, 1000));
+    // The Roland app waits ~10 s here (its MIDI-CI response timeout).
+    // The piano appears to need this delay before the Read + second CCCD
+    // will complete the state transition.  1 s was not enough.
+    this.log('info', 'Waiting 10 s for piano init (MIDI-CI processing)…');
+    await new Promise<void>(resolve => setTimeout(resolve, 10_000));
 
     // Step 4 — Read the MIDI characteristic (matches Roland app sequence)
     try {

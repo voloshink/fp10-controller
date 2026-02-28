@@ -142,7 +142,6 @@ export default function App() {
             {/* ── Metronome toggle ── */}
             <ToggleCard
               label="METRONOME"
-              description="State is mirrored locally — first tap may desync if the piano's metronome was already on."
               value={midi.metronomeOn}
               onToggle={midi.toggleMetronome}
               disabled={!midi.isConnected}

@@ -48,6 +48,18 @@ export function PianoVolumeControl({
   const volumeRef   = useRef(volume);
   volumeRef.current = volume;
 
+  // Local slider value — decoupled from the parent prop to prevent the
+  // bridge-latency snap-back that happens with controlled sliders on release.
+  const [sliderVolume, setSliderVolume] = React.useState(volume);
+  const isDragging = useRef(false);
+
+  // Sync prop → slider only when the thumb isn't being touched.
+  React.useEffect(() => {
+    if (!isDragging.current) {
+      setSliderVolume(volume);
+    }
+  }, [volume]);
+
   const delayTimer  = useRef<ReturnType<typeof setTimeout>>();
   const repeatTimer = useRef<ReturnType<typeof setInterval>>();
 
@@ -82,6 +94,25 @@ export function PianoVolumeControl({
     [disabled, startRepeat],
   );
 
+  // ── Slider handlers ──────────────────────────────────────────────────────
+
+  const handleSliderChange = useCallback(
+    (val: number) => {
+      isDragging.current = true;
+      setSliderVolume(val);
+      onVolumeChange(val);
+    },
+    [onVolumeChange],
+  );
+
+  const handleSliderComplete = useCallback(
+    (val: number) => {
+      isDragging.current = false;
+      onVolumeCommit(val);
+    },
+    [onVolumeCommit],
+  );
+
   return (
     <View style={[styles.card, disabled && styles.disabled]}>
       <Text style={styles.label}>PIANO VOLUME</Text>
@@ -104,9 +135,9 @@ export function PianoVolumeControl({
         minimumValue={0}
         maximumValue={100}
         step={1}
-        value={volume}
-        onValueChange={disabled ? undefined : onVolumeChange}
-        onSlidingComplete={disabled ? undefined : onVolumeCommit}
+        value={sliderVolume}
+        onValueChange={disabled ? undefined : handleSliderChange}
+        onSlidingComplete={disabled ? undefined : handleSliderComplete}
         minimumTrackTintColor={disabled ? Colors.toggleOffTrack : Colors.accent}
         maximumTrackTintColor={Colors.cardBorder}
         thumbTintColor={disabled ? Colors.toggleOffKnob : Colors.accent}

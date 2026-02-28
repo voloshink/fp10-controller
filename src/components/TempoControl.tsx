@@ -54,6 +54,19 @@ export function TempoControl({
   const tempoRef    = useRef(tempo);
   tempoRef.current  = tempo;
 
+  // Local slider value — decoupled from the parent prop to prevent the
+  // bridge-latency snap-back that happens with controlled sliders on release.
+  const [sliderTempo, setSliderTempo] = React.useState(tempo);
+  const isDragging = useRef(false);
+
+  // Sync prop → slider only when the thumb isn't being touched (e.g. ±1
+  // button press or a BLE echo from the piano updating parent state).
+  React.useEffect(() => {
+    if (!isDragging.current) {
+      setSliderTempo(tempo);
+    }
+  }, [tempo]);
+
   // For repeating presses
   const delayTimer    = useRef<ReturnType<typeof setTimeout>>();
   const repeatTimer   = useRef<ReturnType<typeof setInterval>>();
@@ -93,6 +106,25 @@ export function TempoControl({
     [disabled, startRepeat],
   );
 
+  // ── Slider handlers ────────────────────────────────────────────────────────
+
+  const handleSliderChange = useCallback(
+    (val: number) => {
+      isDragging.current = true;
+      setSliderTempo(val);
+      onTempoChange(val);
+    },
+    [onTempoChange],
+  );
+
+  const handleSliderComplete = useCallback(
+    (val: number) => {
+      isDragging.current = false;
+      onTempoCommit(val);
+    },
+    [onTempoCommit],
+  );
+
   // ── Render ─────────────────────────────────────────────────────────────────
 
   return (
@@ -116,10 +148,10 @@ export function TempoControl({
         style={styles.slider}
         minimumValue={20}
         maximumValue={240}
-        step={1}
-        value={tempo}
-        onValueChange={disabled ? undefined : onTempoChange}
-        onSlidingComplete={disabled ? undefined : onTempoCommit}
+        step={10}
+        value={sliderTempo}
+        onValueChange={disabled ? undefined : handleSliderChange}
+        onSlidingComplete={disabled ? undefined : handleSliderComplete}
         minimumTrackTintColor={disabled ? Colors.toggleOffTrack : Colors.accent}
         maximumTrackTintColor={Colors.cardBorder}
         thumbTintColor={disabled ? Colors.toggleOffKnob : Colors.accent}

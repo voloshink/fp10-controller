@@ -113,11 +113,6 @@ export default function App() {
           </View>
         </View>
 
-        {/* ── Piano-key strip ── */}
-        <View style={styles.keysCard}>
-          <PianoKeys />
-        </View>
-
         {/* ── Connection ── */}
         <ConnectionCard
           status={midi.status}
@@ -163,6 +158,11 @@ export default function App() {
               onVolumeCommit={midi.sendMetronomeVolume}
             />
           </View>
+        </View>
+
+        {/* ── Piano-key strip ── */}
+        <View style={styles.keysCard}>
+          <PianoKeys />
         </View>
 
         {/* ── Debug log ── */}

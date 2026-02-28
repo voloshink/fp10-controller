@@ -349,9 +349,15 @@ export class BleMidiManager {
 
   // ── Connection ─────────────────────────────────────────────────────────────
 
-  async connect(device: Device): Promise<void> {
+  async connect(
+    device: Device,
+    onProgress?: (label: string, pct: number) => void,
+  ): Promise<void> {
+    onProgress?.('Connecting…', 0.20);
     this.log('info', `Connecting to ${device.name ?? device.id}…`);
     const connected = await device.connect({ autoConnect: false });
+
+    onProgress?.('Discovering services…', 0.35);
     this.log('info', 'Connected — discovering services…');
     await connected.discoverAllServicesAndCharacteristics();
     this.log('info', 'Services discovered');
@@ -391,6 +397,7 @@ export class BleMidiManager {
     // mode where DT1 writes are also accepted.
 
     // Step 1 — Read the MIDI characteristic (matches Roland app)
+    onProgress?.('Enabling MIDI…', 0.48);
     try {
       const readResult = await this.ble.readCharacteristicForDevice(
         connected.id, BLE_MIDI_SERVICE, BLE_MIDI_CHARACTERISTIC,
@@ -424,6 +431,7 @@ export class BleMidiManager {
     // Sizes derived from Roland's DT1 responses:
     //   [01,00,07,00] → 8 data bytes  → size [0,0,0,8]
     //   [01,00,08,00] → 1 data byte   → size [0,0,0,1]
+    onProgress?.('Initialising…', 0.60);
     this.log('info', 'Sending RQ1 init sequence…');
     await this.writeSysEx(buildRQ1([0x01, 0x00, 0x07, 0x00], [0x00, 0x00, 0x00, 0x08]));
     await this.writeSysEx(buildRQ1([0x01, 0x00, 0x08, 0x00], [0x00, 0x00, 0x00, 0x01]));
@@ -447,6 +455,7 @@ export class BleMidiManager {
 
     // Step 7 — Studio Set initialization (matches Roland)
     // Roland sends these DT1 writes before bulk-reading System Common.
+    onProgress?.('Loading piano state…', 0.75);
     this.log('info', 'Sending Studio Set init…');
     await this.writeSysEx(buildDT1([0x01, 0x00, 0x03, 0x06], [0x01]));
     await this.writeSysEx(buildDT1([0x01, 0x00, 0x03, 0x00], [0x00, 0x01]));
@@ -454,11 +463,13 @@ export class BleMidiManager {
     // Step 8 — Bulk read System Common + Studio Set Common (matches Roland)
     // The System Common area includes [01,00,01,0f] (metronome state).
     // Reading this may activate the metronome subsystem.
+    onProgress?.('Syncing settings…', 0.88);
     this.log('info', 'Reading System Common + Studio Set Common…');
     await this.writeSysEx(buildRQ1([0x01, 0x00, 0x01, 0x00], [0x00, 0x00, 0x01, 0x00]));
     await this.writeSysEx(buildRQ1([0x01, 0x00, 0x02, 0x00], [0x00, 0x00, 0x01, 0x00]));
     await new Promise<void>(resolve => setTimeout(resolve, 500));
 
+    onProgress?.('Ready', 1.0);
     this.log('info', 'Piano ready — init complete');
 
     this.disconnectSub?.remove();

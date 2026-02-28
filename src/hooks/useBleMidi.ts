@@ -24,9 +24,10 @@ import { Device } from 'react-native-ble-plx';
 
 export interface BleMidiState {
   // connection
-  status:        ConnectionStatus;
-  statusMessage: string;
-  isConnected:   boolean;
+  status:             ConnectionStatus;
+  statusMessage:      string;
+  connectionProgress: number;   // 0–1, only meaningful during scanning/connecting
+  isConnected:        boolean;
   /** Pass this to BleMidiManager so it logs through your useLogger instance. */
   setLogFn:      (fn: LogFn) => void;
 
@@ -54,8 +55,9 @@ export function useBleMidi(): BleMidiState {
   const mgrRef = useRef<BleMidiManager | null>(null);
 
   // connection
-  const [status, setStatus]               = useState<ConnectionStatus>('idle');
-  const [statusMessage, setStatusMessage] = useState('');
+  const [status, setStatus]                         = useState<ConnectionStatus>('idle');
+  const [statusMessage, setStatusMessage]           = useState('');
+  const [connectionProgress, setConnectionProgress] = useState(0);
 
   // piano state
   const [tempo, setTempo]               = useState(120);
@@ -170,25 +172,33 @@ export function useBleMidi(): BleMidiState {
     // Guard: only one scan at a time
     if (statusRef.current === 'scanning' || statusRef.current === 'connecting') return;
     setStatus('scanning');
+    setConnectionProgress(0);
     runConnect(mgr);
   }, []);
 
   async function runConnect(mgr: BleMidiManager) {
     try {
       setStatusMessage('Waiting for Bluetooth…');
+      setConnectionProgress(0.05);
       await mgr.waitForPoweredOn();
 
-      setStatusMessage(`Scanning for "${TARGET}" (15 s)…`);
+      setStatusMessage(`Scanning for FP-10…`);
+      setConnectionProgress(0.12);
 
       await new Promise<void>((resolve, reject) => {
         const stop = mgr.startScan({
           onFound: async (device: Device) => {
             setStatus('connecting');
-            setStatusMessage(`Found ${device.name} — connecting…`);
+            setStatusMessage(`Found ${device.name ?? TARGET}`);
+            setConnectionProgress(0.18);
             try {
-              await mgr.connect(device);
+              await mgr.connect(device, (label, pct) => {
+                setStatusMessage(label);
+                setConnectionProgress(pct);
+              });
               setStatus('connected');
-              setStatusMessage(`Connected to ${device.name}`);
+              setStatusMessage(`Connected to ${device.name ?? TARGET}`);
+              setConnectionProgress(1);
               resolve();
             } catch (err: unknown) {
               reject(err);
@@ -208,6 +218,7 @@ export function useBleMidi(): BleMidiState {
       });
     } catch (err: unknown) {
       setStatus('error');
+      setConnectionProgress(0);
       setStatusMessage(
         err instanceof Error ? err.message : 'Connection failed.',
       );
@@ -218,6 +229,7 @@ export function useBleMidi(): BleMidiState {
     await mgrRef.current?.disconnect();
     setStatus('idle');
     setStatusMessage('');
+    setConnectionProgress(0);
     setMetronome(false);
   }, []);
 
@@ -287,6 +299,7 @@ export function useBleMidi(): BleMidiState {
   return {
     status,
     statusMessage,
+    connectionProgress,
     isConnected: status === 'connected',
     setLogFn,
     tempo,

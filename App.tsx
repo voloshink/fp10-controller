@@ -116,6 +116,7 @@ export default function App() {
         <ConnectionCard
           status={midi.status}
           statusMessage={midi.statusMessage}
+          connectionProgress={midi.connectionProgress}
           onConnect={midi.connect}
           onDisconnect={midi.disconnect}
         />

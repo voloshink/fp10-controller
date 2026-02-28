@@ -1,9 +1,9 @@
-import React from 'react';
+import React, { useEffect, useRef } from 'react';
 import {
   View,
   Text,
   TouchableOpacity,
-  ActivityIndicator,
+  Animated,
   StyleSheet,
 } from 'react-native';
 import { ConnectionStatus } from '../ble/BleMidiManager';
@@ -30,15 +30,17 @@ const STATUS_LABEL: Record<ConnectionStatus, string> = {
 // ─── Component ────────────────────────────────────────────────────────────────
 
 interface Props {
-  status:        ConnectionStatus;
-  statusMessage: string;
-  onConnect:     () => void;
-  onDisconnect:  () => void;
+  status:             ConnectionStatus;
+  statusMessage:      string;
+  connectionProgress: number;   // 0–1
+  onConnect:          () => void;
+  onDisconnect:       () => void;
 }
 
 export function ConnectionCard({
   status,
   statusMessage,
+  connectionProgress,
   onConnect,
   onDisconnect,
 }: Props) {
@@ -46,25 +48,79 @@ export function ConnectionCard({
   const isConnected = status === 'connected';
   const statusColor = STATUS_COLOR[status];
 
+  // ── Animated progress bar ──────────────────────────────────────────────────
+
+  const progressAnim = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    Animated.timing(progressAnim, {
+      toValue: connectionProgress,
+      duration: 450,
+      useNativeDriver: false,
+    }).start();
+  }, [connectionProgress]);
+
+  // Pulse opacity while actively waiting (scanning phase, before first step)
+  const pulseAnim = useRef(new Animated.Value(1)).current;
+  useEffect(() => {
+    if (isBusy) {
+      const pulse = Animated.loop(
+        Animated.sequence([
+          Animated.timing(pulseAnim, { toValue: 0.45, duration: 900, useNativeDriver: true }),
+          Animated.timing(pulseAnim, { toValue: 1,    duration: 900, useNativeDriver: true }),
+        ]),
+      );
+      pulse.start();
+      return () => pulse.stop();
+    } else {
+      pulseAnim.setValue(1);
+    }
+  }, [isBusy]);
+
+  const barWidth = progressAnim.interpolate({
+    inputRange:  [0, 1],
+    outputRange: ['0%', '100%'],
+    extrapolate: 'clamp',
+  });
+
+  const barColor = status === 'connected' ? Colors.connected : Colors.scanning;
+
   return (
     <View style={styles.card}>
       {/* ── Header row: dot + label ── */}
       <View style={styles.headerRow}>
-        <View style={styles.statusDotWrap}>
-          {isBusy ? (
-            <ActivityIndicator color={statusColor} size="small" />
-          ) : (
-            <View style={[styles.dot, { backgroundColor: statusColor }]} />
-          )}
-        </View>
+        <View style={[styles.dot, { backgroundColor: statusColor }]} />
         <Text style={[styles.statusLabel, { color: statusColor }]}>
           {STATUS_LABEL[status]}
         </Text>
       </View>
 
-      {/* ── Detail message ── */}
-      {statusMessage !== '' && (
-        <Text style={styles.message}>{statusMessage}</Text>
+      {/* ── Progress bar (visible while busy or just connected) ── */}
+      {(isBusy || isConnected) && (
+        <View style={styles.progressTrack}>
+          <Animated.View
+            style={[
+              styles.progressFill,
+              { width: barWidth, backgroundColor: barColor },
+            ]}
+          />
+          {/* Shimmer overlay while actively working */}
+          {isBusy && (
+            <Animated.View
+              style={[styles.progressShimmer, { opacity: pulseAnim }]}
+            />
+          )}
+        </View>
+      )}
+
+      {/* ── Step label ── */}
+      {statusMessage !== '' && (isBusy || isConnected) && (
+        <Text style={styles.stepLabel}>{statusMessage}</Text>
+      )}
+
+      {/* ── Error message ── */}
+      {status === 'error' && statusMessage !== '' && (
+        <Text style={styles.errorMessage}>{statusMessage}</Text>
       )}
 
       {/* ── Action button ── */}
@@ -117,25 +173,43 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: Spacing.sm,
   },
-  statusDotWrap: {
-    width: 18,
-    height: 18,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
   dot: {
-    width: 10,
-    height: 10,
+    width: 8,
+    height: 8,
     borderRadius: Radius.full,
   },
   statusLabel: {
     ...Typography.statusText,
   },
 
-  // message
-  message: {
+  // progress bar
+  progressTrack: {
+    height: 4,
+    borderRadius: Radius.full,
+    backgroundColor: Colors.cardBorder,
+    overflow: 'hidden',
+  },
+  progressFill: {
+    height: '100%',
+    borderRadius: Radius.full,
+  },
+  progressShimmer: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: '#FFFFFF22',
+    borderRadius: Radius.full,
+  },
+
+  // step label beneath the bar
+  stepLabel: {
     ...Typography.bodySmall,
-    marginLeft: 28,  // align with status label
+    color: Colors.textMuted,
+    marginTop: -Spacing.xs,
+  },
+
+  // error message
+  errorMessage: {
+    ...Typography.bodySmall,
+    color: Colors.error,
   },
 
   // connect button

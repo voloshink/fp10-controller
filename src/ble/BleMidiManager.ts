@@ -427,15 +427,36 @@ export class BleMidiManager {
     await this.writeSysEx(buildRQ1([0x01, 0x00, 0x07, 0x00], [0x00, 0x00, 0x00, 0x08]));
     await this.writeSysEx(buildRQ1([0x01, 0x00, 0x08, 0x00], [0x00, 0x00, 0x00, 0x01]));
 
-    // Step 4 — Identity Request (matches Roland's init sequence)
-    //   F0 7E 10 06 01 F7  (MIDI Identity Request to device 0x10)
+    // Step 4 — Identity Request to device 0x10 (matches Roland)
     this.log('info', 'Sending Identity Request…');
     await this.writeSysEx([0xf0, 0x7e, 0x10, 0x06, 0x01, 0xf7]);
+    await new Promise<void>(resolve => setTimeout(resolve, 300));
 
-    // Wait for piano to process and send responses
+    // Step 5 — Bulk RQ1 read of system area (matches Roland)
+    // Roland reads [01,00,00,00] which returns model name "CF15C_0001_GL..."
+    // This may be required before the piano accepts DT1 writes.
+    this.log('info', 'Sending bulk system RQ1…');
+    await this.writeSysEx(buildRQ1([0x01, 0x00, 0x00, 0x00], [0x00, 0x00, 0x00, 0x7f]));
     await new Promise<void>(resolve => setTimeout(resolve, 500));
 
-    // Step 5 — Diagnostic: read metronome state to verify DT1 address
+    // Step 6 — Broadcast Identity Request (matches Roland)
+    this.log('info', 'Sending broadcast Identity Request…');
+    await this.writeSysEx([0xf0, 0x7e, 0x7f, 0x06, 0x01, 0xf7]);
+    await new Promise<void>(resolve => setTimeout(resolve, 300));
+
+    // Step 7 — Diagnostic: read tempo, write tempo, read back
+    this.log('info', 'DIAGNOSTIC: testing DT1 write via tempo…');
+    await this.writeSysEx(buildRQ1([0x01, 0x00, 0x03, 0x09], [0x00, 0x00, 0x00, 0x02]));
+    await new Promise<void>(resolve => setTimeout(resolve, 300));
+    // Write tempo = 121 BPM (0x00, 0x79) — should be audible if metronome is on
+    this.log('info', 'Writing tempo = 121 BPM…');
+    await this.writeSysEx(buildDT1([0x01, 0x00, 0x03, 0x09], [0x00, 0x79]));
+    await new Promise<void>(resolve => setTimeout(resolve, 300));
+    this.log('info', 'Reading tempo back…');
+    await this.writeSysEx(buildRQ1([0x01, 0x00, 0x03, 0x09], [0x00, 0x00, 0x00, 0x02]));
+    await new Promise<void>(resolve => setTimeout(resolve, 300));
+
+    // Step 8 — Read metronome state
     this.log('info', 'Reading metronome state…');
     await this.writeSysEx(buildRQ1([0x01, 0x00, 0x05, 0x09], [0x00, 0x00, 0x00, 0x01]));
     await new Promise<void>(resolve => setTimeout(resolve, 500));

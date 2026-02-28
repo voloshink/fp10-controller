@@ -444,6 +444,20 @@ export class BleMidiManager {
     await this.writeSysEx([0xf0, 0x7e, 0x7f, 0x06, 0x01, 0xf7]);
     await new Promise<void>(resolve => setTimeout(resolve, 300));
 
+    // Step 7 — Studio Set initialization (matches Roland)
+    // Roland sends these DT1 writes before bulk-reading System Common.
+    this.log('info', 'Sending Studio Set init…');
+    await this.writeSysEx(buildDT1([0x01, 0x00, 0x03, 0x06], [0x01]));
+    await this.writeSysEx(buildDT1([0x01, 0x00, 0x03, 0x00], [0x00, 0x01]));
+
+    // Step 8 — Bulk read System Common + Studio Set Common (matches Roland)
+    // The System Common area includes [01,00,01,0f] (metronome state).
+    // Reading this may activate the metronome subsystem.
+    this.log('info', 'Reading System Common + Studio Set Common…');
+    await this.writeSysEx(buildRQ1([0x01, 0x00, 0x01, 0x00], [0x00, 0x00, 0x01, 0x00]));
+    await this.writeSysEx(buildRQ1([0x01, 0x00, 0x02, 0x00], [0x00, 0x00, 0x01, 0x00]));
+    await new Promise<void>(resolve => setTimeout(resolve, 500));
+
     this.log('info', 'Piano ready — init complete');
 
     this.disconnectSub?.remove();

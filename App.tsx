@@ -18,7 +18,6 @@ import { useBleMidi } from './src/hooks/useBleMidi';
 import { useLogger }  from './src/hooks/useLogger';
 import { ConnectionCard }          from './src/components/ConnectionCard';
 import { TempoControl }            from './src/components/TempoControl';
-import { ToggleCard }              from './src/components/ToggleCard';
 import { PianoVolumeControl }      from './src/components/PianoVolumeControl';
 import { MetronomeVolumeControl }  from './src/components/MetronomeVolumeControl';
 import { DebugLog }                from './src/components/DebugLog';
@@ -134,20 +133,14 @@ export default function App() {
           <Text style={styles.sectionHeader}>⏱ Metronome</Text>
 
           <View style={styles.sectionCards}>
-            {/* ── Metronome toggle ── */}
-            <ToggleCard
-              label="METRONOME"
-              value={midi.metronomeOn}
-              onToggle={midi.toggleMetronome}
-              disabled={!midi.isConnected}
-            />
-
-            {/* ── Tempo ── */}
+            {/* ── Tempo + metronome toggle ── */}
             <TempoControl
               tempo={midi.tempo}
               disabled={!midi.isConnected}
               onTempoChange={midi.setTempoLocal}
               onTempoCommit={midi.sendTempo}
+              metronomeOn={midi.metronomeOn}
+              onMetronomeToggle={midi.toggleMetronome}
             />
 
             {/* ── Metronome volume ── */}

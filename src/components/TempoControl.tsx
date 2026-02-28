@@ -23,12 +23,14 @@ import { Colors, Typography, Spacing, Radius } from '../theme';
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 interface Props {
-  tempo:           number;
-  disabled:        boolean;
+  tempo:                number;
+  disabled:             boolean;
   /** Update display only – no BLE write (slider drag). */
-  onTempoChange:   (bpm: number) => void;
+  onTempoChange:        (bpm: number) => void;
   /** Update display AND write to BLE (slider release, button press). */
-  onTempoCommit:   (bpm: number) => void;
+  onTempoCommit:        (bpm: number) => void;
+  metronomeOn:          boolean;
+  onMetronomeToggle:    () => void;
 }
 
 // ─── Adjustment button spec ───────────────────────────────────────────────────
@@ -50,6 +52,8 @@ export function TempoControl({
   disabled,
   onTempoChange,
   onTempoCommit,
+  metronomeOn,
+  onMetronomeToggle,
 }: Props) {
   const tempoRef    = useRef(tempo);
   tempoRef.current  = tempo;
@@ -129,7 +133,26 @@ export function TempoControl({
 
   return (
     <View style={[styles.card, disabled && styles.disabled]}>
-      <Text style={styles.label}>TEMPO</Text>
+
+      {/* ── Header row: label + metronome toggle ── */}
+      <View style={styles.headerRow}>
+        <Text style={styles.label}>TEMPO</Text>
+        <TouchableOpacity
+          style={styles.metroToggle}
+          onPress={disabled ? undefined : onMetronomeToggle}
+          disabled={disabled}
+          activeOpacity={0.75}
+          accessibilityRole="switch"
+          accessibilityState={{ checked: metronomeOn, disabled }}
+        >
+          <Text style={[styles.metroLabel, metronomeOn && styles.metroLabelOn]}>
+            METRONOME
+          </Text>
+          <View style={[styles.pillTrack, metronomeOn ? styles.pillTrackOn : styles.pillTrackOff]}>
+            <View style={[styles.pillKnob, metronomeOn ? styles.pillKnobOn : styles.pillKnobOff]} />
+          </View>
+        </TouchableOpacity>
+      </View>
 
       {/* ── BPM number display ── */}
       <View style={styles.displayRow}>
@@ -206,9 +229,57 @@ const styles = StyleSheet.create({
     opacity: 0.55,
   },
 
-  // label
+  // header
+  headerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
   label: {
     ...Typography.sectionLabel,
+  },
+
+  // metronome toggle (top-right)
+  metroToggle: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.xs,
+  },
+  metroLabel: {
+    fontSize: 10,
+    fontWeight: '700',
+    letterSpacing: 1.5,
+    color: Colors.textDim,
+    textTransform: 'uppercase',
+  },
+  metroLabelOn: {
+    color: Colors.toggleOnText,
+  },
+  pillTrack: {
+    width: 44,
+    height: 26,
+    borderRadius: Radius.full,
+    justifyContent: 'center',
+    paddingHorizontal: 3,
+  },
+  pillTrackOn: {
+    backgroundColor: Colors.toggleOnTrack,
+  },
+  pillTrackOff: {
+    backgroundColor: Colors.toggleOffTrack,
+  },
+  pillKnob: {
+    width: 20,
+    height: 20,
+    borderRadius: Radius.full,
+  },
+  pillKnobOn: {
+    backgroundColor: Colors.toggleOnKnob,
+    alignSelf: 'flex-end',
+  },
+  pillKnobOff: {
+    backgroundColor: Colors.toggleOffKnob,
+    alignSelf: 'flex-start',
   },
 
   // BPM display

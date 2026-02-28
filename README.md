@@ -1,5 +1,10 @@
 # FP-10 Controller
 
+> **100% vibe-coded.** Every line of source code, tooling, and documentation
+> in this repo was written by [Claude](https://claude.ai) (Anthropic). Not a
+> single character was typed by a human. Shared as-is for anyone reverse-
+> engineering Roland BLE MIDI or building similar apps.
+
 An Expo / React Native iOS app that connects to a **Roland FP-10 digital piano**
 via Bluetooth LE MIDI and controls its built-in metronome.
 
@@ -14,6 +19,8 @@ via Bluetooth LE MIDI and controls its built-in metronome.
 | Tempo control | Slider (20–240 BPM) + ±1 / ±10 buttons with long-press repeat |
 | Metronome toggle | ON/OFF button; state tracked via piano notifications |
 | Downbeat toggle | ON/OFF button; direct set command (not a toggle) |
+| Piano volume | Slider (0–100); synced from piano state on connect |
+| Metronome volume | Slider (1–10); synced from piano state on connect |
 
 ---
 
@@ -31,6 +38,9 @@ piano-app/
 │   │   └── useBleMidi.ts          React hook wrapping BleMidiManager
 │   └── components/
 │       ├── ConnectionCard.tsx     Scan / disconnect UI
+│       ├── DebugLog.tsx           Scrollable in-app BLE debug log
+│       ├── MetronomeVolumeControl.tsx  Metronome volume slider (1–10)
+│       ├── PianoVolumeControl.tsx      Piano volume slider (0–100)
 │       ├── TempoControl.tsx       Slider + ±buttons
 │       └── ToggleCard.tsx         Reusable on/off toggle card
 ├── tools/
@@ -138,8 +148,11 @@ RQ1 (read):  F0 41 10 00 00 00 28 11 [addr:4] [size:4] [checksum] F7
 |---|---|---|---|
 | Metronome toggle | `01 00 05 09` | `[00]` | Trigger: write `00` to toggle; other values ignored |
 | Metronome state | `01 00 01 0f` | — | RX notification: `00`=off, `01`=on |
-| Tempo | `01 00 03 09` | `[high, low]` | BPM = high×128 + low (7-bit encoding) |
+| Tempo write | `01 00 03 09` | `[high, low]` | BPM = high×128 + low (7-bit encoding) |
+| Tempo broadcast | `01 00 01 08` | — | RX notification: same 2-byte 7-bit encoding; piano sends proactively after any tempo change |
 | Downbeat on/off | `01 00 02 23` | `[00, 01]` / `[00, 00]` | Direct set |
+| Piano volume | `01 00 02 13` | `[v]` | Direct set; range 0x00–0x64 (0–100) |
+| Metronome volume | `01 00 02 21` | `[v]` | Direct set; range 0x01–0x0A (1–10) |
 
 ### BLE UUIDs
 

@@ -183,6 +183,26 @@ class SysExReassembler {
 
 const re = /^(\w+ \d+ [\d:.]+)\s+(ATT \w+|Config)\s+0x[\dA-Fa-f]+\s+\S+\s+(.*)/;
 
+/**
+ * Extract ATT value from raw data bytes (the hex after double-space in Raw Data exports).
+ * Raw format: [conn_handle:2] [hci_len:2] [l2cap_len:2] [l2cap_cid:2] [att_opcode:1] [handle:2?] [value...]
+ *
+ * ATT opcodes with a handle field (value starts at byte 11):
+ *   0x12 Write Request, 0x52 Write Command, 0x1B Handle Value Notification
+ *
+ * ATT opcodes without handle (value starts at byte 9):
+ *   0x0B Read Response
+ */
+function extractValueFromRaw(rawHex) {
+  const bytes = rawHex.trim().split(/\s+/).map(h => parseInt(h, 16)).filter(b => !isNaN(b));
+  if (bytes.length < 9) return null;
+  const opcode = bytes[8];
+  const hasHandle = [0x12, 0x52, 0x1b].includes(opcode);
+  const offset = hasHandle ? 11 : 9;
+  if (offset >= bytes.length) return null;
+  return bytes.slice(offset);
+}
+
 const txReassembler = new SysExReassembler();
 const rxReassembler = new SysExReassembler();
 
@@ -223,7 +243,15 @@ for (const line of lines) {
   if (detail.includes('Read Response')) {
     const vm = detail.match(/Value:\s*([\dA-Fa-f\s…]+)/);
     const rawHex = vm?.[1]?.trim() ?? '';
-    const raw = parseHex(rawHex);
+    // Check for raw data bytes (Raw Data export)
+    const rawDataMatch = detail.match(/…\s{2,}([\dA-Fa-f\s]+)$/) || detail.match(/F7\s{2,}([\dA-Fa-f\s]+)$/);
+    let raw;
+    if (rawDataMatch) {
+      const fullValue = extractValueFromRaw(rawDataMatch[1]);
+      raw = fullValue ?? parseHex(rawHex);
+    } else {
+      raw = parseHex(rawHex);
+    }
     const midi = stripBleMidi(raw);
     if (midi.length > 0) {
       console.log(`${DIM}${shortTime}${RESET}  ${dir}  Read Response  midi=[${hex(midi)}]`);
@@ -236,11 +264,13 @@ for (const line of lines) {
   // Write Request (CCCD etc)
   if (detail.includes('Write Request')) {
     const hm = detail.match(/Handle:(0x[\dA-Fa-f]+)/);
-    const vm = detail.match(/Value:\s*([\dA-Fa-f\s]+)/);
+    const vm = detail.match(/Value:\s*([\dA-Fa-f]+)/);
     const handle = hm?.[1] ?? '?';
     const val = vm?.[1]?.trim() ?? '';
     if (handle === '0x0011' && val === '0100') {
       console.log(`${DIM}${shortTime}${RESET}  ${dir}  ${BOLD}CCCD Enable Notifications${RESET}  handle=${handle}`);
+    } else if (handle === '0x0011' && val === '0000') {
+      console.log(`${DIM}${shortTime}${RESET}  ${dir}  ${DIM}CCCD Disable Notifications${RESET}  handle=${handle}`);
     } else {
       console.log(`${DIM}${shortTime}${RESET}  ${dir}  Write Request  handle=${handle} val=[${val}]`);
     }
@@ -252,12 +282,36 @@ for (const line of lines) {
   }
 
   // Write Command or Notification — these carry BLE-MIDI data
-  const vm = detail.match(/Value:\s*([\dA-Fa-f\s…]+)/);
-  if (!vm) continue;
+  //
+  // Raw Data export format has the full packet after a double-space:
+  //   Value: 8099 F041…  58 00 1A 00 16 00 04 00 52 10 00 80 99 F0 41 ...
+  //          ^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  //          text (trunc)         raw L2CAP/ATT bytes (full)
 
-  const rawHex = vm[1].trim();
-  const raw = parseHex(rawHex);
-  const truncated = rawHex.includes('…');
+  // Split on double-space to separate text value from raw data
+  const parts = detail.split(/\s{2,}/);
+  const valuePart = parts.find(p => p.includes('Value:'));
+  if (!valuePart) continue;
+
+  const textHex = valuePart.replace(/^.*Value:\s*/, '').trim();
+  let truncated = textHex.includes('…');
+
+  // Look for raw data hex (the part AFTER the text display, separated by double-space)
+  // Raw Data export includes full L2CAP/ATT bytes — extract just the ATT value
+  const valueIdx = parts.indexOf(valuePart);
+  const rawDataPart = parts.find((p, i) => i > valueIdx && /^[\dA-Fa-f]{2}\s/.test(p));
+  let raw;
+  if (rawDataPart) {
+    const fullValue = extractValueFromRaw(rawDataPart);
+    if (fullValue) {
+      raw = fullValue;
+      truncated = false; // full data recovered from raw bytes
+    } else {
+      raw = parseHex(textHex);
+    }
+  } else {
+    raw = parseHex(textHex);
+  }
 
   if (showRaw) {
     console.log(`${DIM}${shortTime}${RESET}  ${dir}  ${DIM}raw[${raw.length}${truncated ? '+' : ''}]: ${hex(raw)}${truncated ? '…' : ''}${RESET}`);

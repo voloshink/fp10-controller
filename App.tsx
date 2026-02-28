@@ -16,10 +16,12 @@ import { StatusBar } from 'expo-status-bar';
 
 import { useBleMidi } from './src/hooks/useBleMidi';
 import { useLogger }  from './src/hooks/useLogger';
-import { ConnectionCard } from './src/components/ConnectionCard';
-import { TempoControl }   from './src/components/TempoControl';
-import { ToggleCard }     from './src/components/ToggleCard';
-import { DebugLog }       from './src/components/DebugLog';
+import { ConnectionCard }          from './src/components/ConnectionCard';
+import { TempoControl }            from './src/components/TempoControl';
+import { ToggleCard }              from './src/components/ToggleCard';
+import { PianoVolumeControl }      from './src/components/PianoVolumeControl';
+import { MetronomeVolumeControl }  from './src/components/MetronomeVolumeControl';
+import { DebugLog }                from './src/components/DebugLog';
 import { Colors, Typography, Spacing, Radius } from './src/theme';
 
 // ─── Piano-key decorative strip ───────────────────────────────────────────────
@@ -124,6 +126,14 @@ export default function App() {
           onDisconnect={midi.disconnect}
         />
 
+        {/* ── Piano volume ── */}
+        <PianoVolumeControl
+          volume={midi.pianoVolume}
+          disabled={!midi.isConnected}
+          onVolumeChange={midi.setPianoVolLocal}
+          onVolumeCommit={midi.sendPianoVolume}
+        />
+
         {/* ── Tempo ── */}
         <TempoControl
           tempo={midi.tempo}
@@ -141,13 +151,12 @@ export default function App() {
           disabled={!midi.isConnected}
         />
 
-        {/* ── Downbeat toggle ── */}
-        <ToggleCard
-          label="DOWNBEAT"
-          description="Accent on beat 1 (direct on/off command)"
-          value={midi.downbeatOn}
-          onToggle={() => midi.setDownbeatOn(!midi.downbeatOn)}
+        {/* ── Metronome volume ── */}
+        <MetronomeVolumeControl
+          volume={midi.metronomeVolume}
           disabled={!midi.isConnected}
+          onVolumeChange={midi.setMetronomeVolLocal}
+          onVolumeCommit={midi.sendMetronomeVolume}
         />
 
         {/* ── Debug log ── */}

@@ -14,9 +14,6 @@
  *   • We mirror state locally starting from false (off).
  *   • A note in the UI warns the user that the first press may de-sync if the
  *     piano's metronome was already running before connecting.
- *
- * Downbeat flow:
- *   • Explicit set command (0x01 / 0x00), so state always matches piano.
  */
 
 import { useState, useEffect, useRef, useCallback } from 'react';
@@ -34,17 +31,21 @@ export interface BleMidiState {
   setLogFn:      (fn: LogFn) => void;
 
   // piano controls
-  tempo:        number;
-  metronomeOn:  boolean;
-  downbeatOn:   boolean;
+  tempo:           number;
+  metronomeOn:     boolean;
+  metronomeVolume: number;   // 1–10
+  pianoVolume:     number;   // 0–100
 
   // actions
-  connect:         () => void;
-  disconnect:      () => void;
-  setTempoLocal:   (bpm: number) => void;   // display-only, no BLE write
-  sendTempo:       (bpm: number) => void;   // display + BLE write
-  toggleMetronome: () => void;
-  setDownbeatOn:   (on: boolean) => void;
+  connect:               () => void;
+  disconnect:            () => void;
+  setTempoLocal:         (bpm: number) => void;    // display-only, no BLE write
+  sendTempo:             (bpm: number) => void;    // display + BLE write
+  toggleMetronome:       () => void;
+  setMetronomeVolLocal:  (vol: number) => void;    // display-only, no BLE write
+  sendMetronomeVolume:   (vol: number) => void;    // display + BLE write
+  setPianoVolLocal:      (vol: number) => void;    // display-only, no BLE write
+  sendPianoVolume:       (vol: number) => void;    // display + BLE write
 }
 
 // ─── Hook ────────────────────────────────────────────────────────────────────
@@ -57,9 +58,10 @@ export function useBleMidi(): BleMidiState {
   const [statusMessage, setStatusMessage] = useState('');
 
   // piano state
-  const [tempo, setTempo]           = useState(120);
-  const [metronomeOn, setMetronome] = useState(false);
-  const [downbeatOn, setDownbeat]   = useState(true);
+  const [tempo, setTempo]               = useState(120);
+  const [metronomeOn, setMetronome]     = useState(false);
+  const [metronomeVolume, setMetVol]    = useState(5);    // mid-range default
+  const [pianoVolume, setPianoVol]      = useState(100);  // max default
 
   // ── Lifecycle ──────────────────────────────────────────────────────────────
 
@@ -108,10 +110,25 @@ export function useBleMidi(): BleMidiState {
           if (data.length >= 1) setMetronome(data[0] === 0x01);
           break;
 
-        case '01000223':
-          // Downbeat — direct set: 0x01 = on, 0x00 = off
-          if (data.length >= 1) setDownbeat(data[0] === 0x01);
+        case '01000213':
+          // Piano volume — direct set, range 0x00–0x64 (0–100)
+          if (data.length >= 1 && data[0] <= 100) setPianoVol(data[0]);
           break;
+
+        case '01000221':
+          // Metronome volume — direct set, range 0x01–0x0A (1–10)
+          if (data.length >= 1 && data[0] >= 1 && data[0] <= 10) setMetVol(data[0]);
+          break;
+
+        case '01000200': {
+          // Bulk DT1 response to the init RQ1 at [01,00,02,00] (size 256).
+          // Piano volume at offset 0x13, metronome volume at offset 0x21.
+          const pvol = data[0x13];
+          if (pvol !== undefined && pvol <= 100) setPianoVol(pvol);
+          const mvol = data[0x21];
+          if (mvol !== undefined && mvol >= 1 && mvol <= 10) setMetVol(mvol);
+          break;
+        }
 
         // Legacy cases — if the piano echoes on the write addresses too
         case '01000309': {
@@ -220,6 +237,38 @@ export function useBleMidi(): BleMidiState {
     );
   }, []);
 
+  // ── Metronome volume ───────────────────────────────────────────────────────
+
+  const clampMetVol = (v: number) => Math.max(1, Math.min(10, Math.round(v)));
+
+  const setMetronomeVolLocal = useCallback((vol: number) => {
+    setMetVol(clampMetVol(vol));
+  }, []);
+
+  const sendMetronomeVolume = useCallback((vol: number) => {
+    const clamped = clampMetVol(vol);
+    setMetVol(clamped);
+    mgrRef.current?.sendMetronomeVolume(clamped).catch((e) =>
+      console.warn('[FP-10] sendMetronomeVolume failed:', e),
+    );
+  }, []);
+
+  // ── Piano volume ───────────────────────────────────────────────────────────
+
+  const clampPianoVol = (v: number) => Math.max(0, Math.min(100, Math.round(v)));
+
+  const setPianoVolLocal = useCallback((vol: number) => {
+    setPianoVol(clampPianoVol(vol));
+  }, []);
+
+  const sendPianoVolume = useCallback((vol: number) => {
+    const clamped = clampPianoVol(vol);
+    setPianoVol(clamped);
+    mgrRef.current?.sendPianoVolume(clamped).catch((e) =>
+      console.warn('[FP-10] sendPianoVolume failed:', e),
+    );
+  }, []);
+
   // ── Metronome ──────────────────────────────────────────────────────────────
 
   const toggleMetronome = useCallback(() => {
@@ -233,15 +282,6 @@ export function useBleMidi(): BleMidiState {
     );
   }, []);
 
-  // ── Downbeat ───────────────────────────────────────────────────────────────
-
-  const setDownbeatOn = useCallback((on: boolean) => {
-    setDownbeat(on);
-    mgrRef.current?.sendDownbeat(on).catch((e) =>
-      console.warn('[FP-10] sendDownbeat failed:', e),
-    );
-  }, []);
-
   // ── Return ─────────────────────────────────────────────────────────────────
 
   return {
@@ -251,13 +291,17 @@ export function useBleMidi(): BleMidiState {
     setLogFn,
     tempo,
     metronomeOn,
-    downbeatOn,
+    metronomeVolume,
+    pianoVolume,
     connect,
     disconnect,
     setTempoLocal,
     sendTempo,
     toggleMetronome,
-    setDownbeatOn,
+    setMetronomeVolLocal,
+    sendMetronomeVolume,
+    setPianoVolLocal,
+    sendPianoVolume,
   };
 }
 

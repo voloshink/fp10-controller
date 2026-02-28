@@ -26,9 +26,10 @@
  *   Multi-packet SysEx is reassembled across notification calls.
  *
  * ── Confirmed addresses ───────────────────────────────────────────────────────
- *   Tempo      01 00 03 09  DT1 value = BPM byte (20–240)
- *   Metronome  01 00 05 09  DT1 value = 0x71 toggle; RQ1 returns 0x00/0x01
- *   Downbeat   01 00 02 23  DT1 value = 0x01 on / 0x00 off
+ *   Tempo             01 00 03 09  DT1 value = 2-byte 7-bit BPM (20–240)
+ *   Metronome toggle  01 00 05 09  DT1 value = 0x00 (trigger); piano echoes state at 01 00 01 0F
+ *   Metronome volume  01 00 02 21  DT1 value = 0x01–0x0A (1–10)
+ *   Piano volume      01 00 02 13  DT1 value = 0x00–0x64 (0–100)
  */
 
 import { BleManager, BleError, Characteristic, Device, State } from 'react-native-ble-plx';
@@ -538,8 +539,18 @@ export class BleMidiManager {
     await this.writeSysEx(buildDT1([0x01, 0x00, 0x05, 0x09], [0x00]));
   }
 
-  async sendDownbeat(on: boolean): Promise<void> {
-    await this.writeSysEx(buildDT1([0x01, 0x00, 0x02, 0x23], [0x00, on ? 0x01 : 0x00]));
+  async sendMetronomeVolume(volume: number): Promise<void> {
+    // [01,00,02,21] — direct set, single byte, range 0x01–0x0A (1–10).
+    // Confirmed via PacketLogger trace (Feb 28 2026).
+    const v = Math.max(1, Math.min(10, Math.round(volume)));
+    await this.writeSysEx(buildDT1([0x01, 0x00, 0x02, 0x21], [v]));
+  }
+
+  async sendPianoVolume(volume: number): Promise<void> {
+    // [01,00,02,13] — direct set, single byte, range 0x00–0x64 (0–100).
+    // Confirmed via PacketLogger trace (Feb 28 2026).
+    const v = Math.max(0, Math.min(100, Math.round(volume)));
+    await this.writeSysEx(buildDT1([0x01, 0x00, 0x02, 0x13], [v]));
   }
 
   // ── FP-10 read requests (RQ1) ─────────────────────────────────────────────

@@ -444,24 +444,7 @@ export class BleMidiManager {
     await this.writeSysEx([0xf0, 0x7e, 0x7f, 0x06, 0x01, 0xf7]);
     await new Promise<void>(resolve => setTimeout(resolve, 300));
 
-    // Step 7 — Diagnostic: read tempo, write tempo, read back
-    this.log('info', 'DIAGNOSTIC: testing DT1 write via tempo…');
-    await this.writeSysEx(buildRQ1([0x01, 0x00, 0x03, 0x09], [0x00, 0x00, 0x00, 0x02]));
-    await new Promise<void>(resolve => setTimeout(resolve, 300));
-    // Write tempo = 121 BPM (0x00, 0x79) — should be audible if metronome is on
-    this.log('info', 'Writing tempo = 121 BPM…');
-    await this.writeSysEx(buildDT1([0x01, 0x00, 0x03, 0x09], [0x00, 0x79]));
-    await new Promise<void>(resolve => setTimeout(resolve, 300));
-    this.log('info', 'Reading tempo back…');
-    await this.writeSysEx(buildRQ1([0x01, 0x00, 0x03, 0x09], [0x00, 0x00, 0x00, 0x02]));
-    await new Promise<void>(resolve => setTimeout(resolve, 300));
-
-    // Step 8 — Read metronome state
-    this.log('info', 'Reading metronome state…');
-    await this.writeSysEx(buildRQ1([0x01, 0x00, 0x05, 0x09], [0x00, 0x00, 0x00, 0x01]));
-    await new Promise<void>(resolve => setTimeout(resolve, 500));
-
-    this.log('info', 'Piano ready');
+    this.log('info', 'Piano ready — init complete');
 
     this.disconnectSub?.remove();
     this.disconnectSub = this.ble.onDeviceDisconnected(connected.id, () => {
@@ -534,14 +517,12 @@ export class BleMidiManager {
   }
 
   async sendMetronomeToggle(): Promise<void> {
-    // DEBUG: try explicit ON (0x01) instead of toggle (0x71).
-    // After sending, read back the state to verify DT1 was processed.
-    this.log('info', 'Metronome: sending ON (0x01)…');
+    // TODO: [01,00,05,09] is READ-ONLY — it reports metronome state but
+    // writes are silently ignored.  Need to capture Roland Piano Partner 2
+    // toggling the metronome to find the correct write address/command.
+    //
+    // For now, send 0x01 (ON) — will be updated once we have the trace.
     await this.writeSysEx(buildDT1([0x01, 0x00, 0x05, 0x09], [0x01]));
-    // Read back
-    await new Promise<void>(resolve => setTimeout(resolve, 200));
-    this.log('info', 'Metronome: reading back state…');
-    await this.writeSysEx(buildRQ1([0x01, 0x00, 0x05, 0x09], [0x00, 0x00, 0x00, 0x01]));
   }
 
   async sendDownbeat(on: boolean): Promise<void> {

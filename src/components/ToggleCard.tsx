@@ -43,26 +43,12 @@ export function ToggleCard({
   return (
     <View style={[styles.card, disabled && styles.cardDisabled]}>
 
-      {/* ── Heading row ── */}
-      <View style={styles.headingRow}>
-        <View style={styles.headingText}>
-          <Text style={styles.label}>{label}</Text>
-          {description != null && (
-            <Text style={styles.description}>{description}</Text>
-          )}
-        </View>
-
-        {/* Inline pill-switch */}
-        <TouchableOpacity
-          style={[styles.pillTrack, value ? styles.pillTrackOn : styles.pillTrackOff]}
-          onPress={disabled ? undefined : onToggle}
-          disabled={disabled}
-          activeOpacity={0.85}
-          accessibilityRole="switch"
-          accessibilityState={{ checked: value, disabled }}
-        >
-          <View style={[styles.pillKnob, value ? styles.pillKnobOn : styles.pillKnobOff]} />
-        </TouchableOpacity>
+      {/* ── Heading ── */}
+      <View style={styles.headingText}>
+        <Text style={styles.label}>{label}</Text>
+        {description != null && (
+          <Text style={styles.description}>{description}</Text>
+        )}
       </View>
 
       {/* ── Big tap button ── */}
@@ -104,13 +90,7 @@ const styles = StyleSheet.create({
   },
 
   // heading
-  headingRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-  },
   headingText: {
-    flex: 1,
     gap: 3,
   },
   label: {
@@ -118,34 +98,6 @@ const styles = StyleSheet.create({
   },
   description: {
     ...Typography.bodySmall,
-  },
-
-  // pill switch
-  pillTrack: {
-    width: 52,
-    height: 30,
-    borderRadius: Radius.full,
-    justifyContent: 'center',
-    paddingHorizontal: 3,
-  },
-  pillTrackOn: {
-    backgroundColor: Colors.toggleOnTrack,
-  },
-  pillTrackOff: {
-    backgroundColor: Colors.toggleOffTrack,
-  },
-  pillKnob: {
-    width: 24,
-    height: 24,
-    borderRadius: Radius.full,
-  },
-  pillKnobOn: {
-    backgroundColor: Colors.toggleOnKnob,
-    alignSelf: 'flex-end',
-  },
-  pillKnobOff: {
-    backgroundColor: Colors.toggleOffKnob,
-    alignSelf: 'flex-start',
   },
 
   // big button

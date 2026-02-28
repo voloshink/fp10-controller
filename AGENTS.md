@@ -24,8 +24,9 @@ Same decoding for React Native LOG output. Copy logs from Metro bundler, pipe in
 ### Key addresses
 | Address | Name | Data |
 |---------|------|------|
+| `01 00 01 0f` | Metronome State | RX only: `00`=off, `01`=on (notification) |
 | `01 00 03 09` | Tempo | 2 bytes: `[high, low]` → BPM = high×128 + low |
-| `01 00 05 09` | Metronome | 1 byte: `00`=off, `01`=on |
+| `01 00 05 09` | Metronome Toggle | TRIGGER: write `[00]` to toggle; other values ignored |
 | `01 00 02 23` | Downbeat | 2 bytes: `[00, 01]`=on, `[00, 00]`=off |
 | `01 00 07 00` | System Info Block 1 | 8 bytes (RQ1 init, size=8) |
 | `01 00 08 00` | System Info Block 2 | 1 byte (RQ1 init, size=1) |

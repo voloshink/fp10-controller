@@ -517,12 +517,11 @@ export class BleMidiManager {
   }
 
   async sendMetronomeToggle(): Promise<void> {
-    // TODO: [01,00,05,09] is READ-ONLY — it reports metronome state but
-    // writes are silently ignored.  Need to capture Roland Piano Partner 2
-    // toggling the metronome to find the correct write address/command.
-    //
-    // For now, send 0x01 (ON) — will be updated once we have the trace.
-    await this.writeSysEx(buildDT1([0x01, 0x00, 0x05, 0x09], [0x01]));
+    // [01,00,05,09] is a TRIGGER register — writing 0x00 toggles the
+    // metronome on/off.  The piano confirms the new state via a DT1
+    // notification at [01,00,01,0f] (0x00=off, 0x01=on).
+    // Writing any other value (e.g. 0x01) is silently ignored.
+    await this.writeSysEx(buildDT1([0x01, 0x00, 0x05, 0x09], [0x00]));
   }
 
   async sendDownbeat(on: boolean): Promise<void> {

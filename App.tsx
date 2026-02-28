@@ -134,30 +134,37 @@ export default function App() {
           onVolumeCommit={midi.sendPianoVolume}
         />
 
-        {/* ── Tempo ── */}
-        <TempoControl
-          tempo={midi.tempo}
-          disabled={!midi.isConnected}
-          onTempoChange={midi.setTempoLocal}
-          onTempoCommit={midi.sendTempo}
-        />
+        {/* ── Metronome section ── */}
+        <View style={styles.section}>
+          <Text style={styles.sectionHeader}>⏱ Metronome</Text>
 
-        {/* ── Metronome toggle ── */}
-        <ToggleCard
-          label="METRONOME"
-          description="State is mirrored locally — first tap may desync if the piano's metronome was already on."
-          value={midi.metronomeOn}
-          onToggle={midi.toggleMetronome}
-          disabled={!midi.isConnected}
-        />
+          <View style={styles.sectionCards}>
+            {/* ── Metronome toggle ── */}
+            <ToggleCard
+              label="METRONOME"
+              description="State is mirrored locally — first tap may desync if the piano's metronome was already on."
+              value={midi.metronomeOn}
+              onToggle={midi.toggleMetronome}
+              disabled={!midi.isConnected}
+            />
 
-        {/* ── Metronome volume ── */}
-        <MetronomeVolumeControl
-          volume={midi.metronomeVolume}
-          disabled={!midi.isConnected}
-          onVolumeChange={midi.setMetronomeVolLocal}
-          onVolumeCommit={midi.sendMetronomeVolume}
-        />
+            {/* ── Tempo ── */}
+            <TempoControl
+              tempo={midi.tempo}
+              disabled={!midi.isConnected}
+              onTempoChange={midi.setTempoLocal}
+              onTempoCommit={midi.sendTempo}
+            />
+
+            {/* ── Metronome volume ── */}
+            <MetronomeVolumeControl
+              volume={midi.metronomeVolume}
+              disabled={!midi.isConnected}
+              onVolumeChange={midi.setMetronomeVolLocal}
+              onVolumeCommit={midi.sendMetronomeVolume}
+            />
+          </View>
+        </View>
 
         {/* ── Debug log ── */}
         <DebugLog entries={logger.entries} onClear={logger.clear} />
@@ -223,6 +230,27 @@ const styles = StyleSheet.create({
     borderColor: Colors.cardBorder,
     overflow: 'hidden',
     padding: Spacing.sm,
+  },
+
+  // metronome section group
+  section: {
+    gap: Spacing.xs,
+  },
+  sectionHeader: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: Colors.textMuted,
+    letterSpacing: 1.5,
+    textTransform: 'uppercase',
+    paddingHorizontal: Spacing.xs,
+  },
+  sectionCards: {
+    gap: Spacing.md,
+    backgroundColor: Colors.card,
+    borderRadius: Radius.lg,
+    borderWidth: 1,
+    borderColor: Colors.cardBorder,
+    padding: Spacing.md,
   },
 
   // footer

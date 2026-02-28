@@ -188,6 +188,7 @@ const styles = StyleSheet.create({
   displayRow: {
     flexDirection: 'row',
     alignItems: 'flex-end',
+    justifyContent: 'center',
     gap: Spacing.sm,
     paddingTop: Spacing.xs,
   },

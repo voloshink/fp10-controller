@@ -124,7 +124,7 @@ export function PianoVolumeControl({
           adjustsFontSizeToFit
           numberOfLines={1}
         >
-          {String(volume).padStart(3, '\u2007')}
+          {volume}
         </Text>
         <Text style={styles.volUnit}>/ 100</Text>
       </View>
@@ -198,12 +198,12 @@ const styles = StyleSheet.create({
   displayRow: {
     flexDirection: 'row',
     alignItems: 'flex-end',
+    justifyContent: 'center',
     gap: Spacing.sm,
     paddingTop: Spacing.xs,
   },
   volNumber: {
     ...Typography.bpmNumber,
-    minWidth: 180,
   },
   volUnit: {
     ...Typography.bpmUnit,

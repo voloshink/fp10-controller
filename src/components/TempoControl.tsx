@@ -138,7 +138,7 @@ export function TempoControl({
           adjustsFontSizeToFit
           numberOfLines={1}
         >
-          {String(tempo).padStart(3, '\u2007') /* figure-space padding */}
+          {tempo}
         </Text>
         <Text style={styles.bpmUnit}>BPM</Text>
       </View>
@@ -215,12 +215,12 @@ const styles = StyleSheet.create({
   displayRow: {
     flexDirection: 'row',
     alignItems: 'flex-end',
+    justifyContent: 'center',
     gap: Spacing.sm,
     paddingTop: Spacing.xs,
   },
   bpmNumber: {
     ...Typography.bpmNumber,
-    minWidth: 180,
   },
   bpmUnit: {
     ...Typography.bpmUnit,

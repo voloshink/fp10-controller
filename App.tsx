@@ -6,13 +6,17 @@
 
 import React from 'react';
 import {
-  SafeAreaView,
   ScrollView,
   View,
   Text,
   StyleSheet,
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
+import {
+  SafeAreaProvider,
+  SafeAreaView,
+  useSafeAreaInsets,
+} from 'react-native-safe-area-context';
 
 import { useBleMidi } from './src/hooks/useBleMidi';
 import { useLogger }  from './src/hooks/useLogger';
@@ -81,9 +85,10 @@ const keys = StyleSheet.create({
 
 // ─── Main screen ──────────────────────────────────────────────────────────────
 
-export default function App() {
+function AppInner() {
   const midi   = useBleMidi();
   const logger = useLogger();
+  const { bottom } = useSafeAreaInsets();
 
   // Wire the logger into the BLE manager once on mount
   React.useEffect(() => {
@@ -92,14 +97,17 @@ export default function App() {
   }, []);
 
   return (
-    <SafeAreaView style={styles.root}>
+    // edges={['top']} — only apply top safe-area padding so the scroll view
+    // extends edge-to-edge at the bottom (no dead black bar above home indicator).
+    <SafeAreaView style={styles.root} edges={['top']}>
       <StatusBar style="light" />
 
       <ScrollView
         style={styles.scroll}
-        contentContainerStyle={styles.content}
+        contentContainerStyle={[styles.content, { paddingBottom: Math.max(48, bottom + 16) }]}
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
+        contentInsetAdjustmentBehavior="never"
       >
         {/* ── Header ── */}
         <View style={styles.header}>
@@ -171,6 +179,14 @@ export default function App() {
   );
 }
 
+export default function App() {
+  return (
+    <SafeAreaProvider>
+      <AppInner />
+    </SafeAreaProvider>
+  );
+}
+
 // ─── Styles ───────────────────────────────────────────────────────────────────
 
 const styles = StyleSheet.create({
@@ -184,7 +200,7 @@ const styles = StyleSheet.create({
   content: {
     padding: Spacing.md,
     gap: Spacing.md,
-    paddingBottom: 48,
+    // paddingBottom is set dynamically in JSX using useSafeAreaInsets
   },
 
   // header
